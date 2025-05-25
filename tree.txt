@@ -1,0 +1,10 @@
+dicom_api_mcp_project/
+├── venv/                     # Directorio del entorno virtual (se creará luego)
+├── api_main.py               # Nuevo: Aquí irá el código de FastAPI para los endpoints [cite: 30]
+├── pacs_operations.py        # Existente: Lo extenderemos para C-FIND y C-MOVE [cite: 12, 22]
+├── config.py                 # Existente: Para la configuración del PACS, AETs, etc. [cite: 8, 14]
+├── utils.py                  # Existente (si tienes utilidades generales)
+├── dicom_processing_pipeline.py # Existente (lógica de procesamiento actual) [cite: 8, 12]
+├── baml_classification.py    # Existente (si se mantiene) [cite: 8, 12]
+├── linealize.py              # Existente (si se mantiene) [cite: 8]
+├── requirements.txt          # Para listar las dependencias [cite: 15]
