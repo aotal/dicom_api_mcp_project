@@ -1,13 +1,9 @@
 # api_main.py
 import logging
-import re 
+import re
 from fastapi import FastAPI, HTTPException, Query
-# Los modelos Pydantic ahora se importan desde models.py
-from typing import Any, List, Optional, Dict, Tuple # Tuple es usado por _parse_range_to_floats
-
-# Importa tus modelos desde el archivo models.py
-# Usamos una importación directa ya que models.py está en el mismo directorio
-from models import StudyResponse, SeriesResponse, InstanceMetadataResponse, LUTExplanationModel
+from pydantic import BaseModel, Field
+from typing import Any, List, Optional, Dict, Tuple # Añadido Tuple
 
 import pydicom
 from pydicom.tag import Tag
@@ -27,17 +23,52 @@ if not logger.hasHandlers():
 
 app = FastAPI(title="API de Consultas PACS DICOM", version="1.0.0")
 
-# --- Modelos Pydantic YA NO ESTÁN AQUÍ ---
+# --- Modelos Pydantic ---
+class StudyResponse(BaseModel):
+    StudyInstanceUID: str
+    PatientID: Optional[str] = None
+    PatientName: Optional[str] = None
+    StudyDate: Optional[str] = None
+    StudyDescription: Optional[str] = None
+    ModalitiesInStudy: Optional[str] = None
+    AccessionNumber: Optional[str] = None
+
+class LUTExplanationModel(BaseModel):
+    FullText: Optional[str] = None
+    Explanation: Optional[str] = None
+    InCalibRange: Optional[Tuple[float, float]] = None # MODIFICADO
+    OutLUTRange: Optional[Tuple[float, float]] = None  # MODIFICADO
+
+class ModalityLUTItemModel(BaseModel):
+    LUTDescriptor: Optional[List[int]] = None
+    LUTExplanation: Optional[LUTExplanationModel] = None
+    ModalityLUTType: Optional[str] = None
+    LUTData: Optional[str] = None
+
+class InstanceMetadataResponse(BaseModel):
+    SOPInstanceUID: str
+    InstanceNumber: Optional[str] = None
+    dicom_headers: Dict[str, Any]
+
+class SeriesResponse(BaseModel):
+    StudyInstanceUID: str
+    SeriesInstanceUID: str
+    Modality: Optional[str] = None
+    SeriesNumber: Optional[str] = None
+    SeriesDescription: Optional[str] = None
+    ImageComments: Optional[str] = None
+
 
 # --- Funciones Auxiliares ---
 def _parse_range_to_floats(range_str: Optional[str]) -> Optional[Tuple[float, float]]:
+    """Convierte una cadena 'num-num' o 'num' a una tupla de flotantes."""
     if not range_str:
         return None
     try:
         parts = range_str.strip().split('-')
-        if len(parts) == 1: 
+        if len(parts) == 1: # Asumir que es un solo número si no hay guion
             val = float(parts[0].strip())
-            return (val, val) 
+            return (val, val) # O podrías decidir devolver (val, None) o (None, val)
         elif len(parts) == 2:
             return (float(parts[0].strip()), float(parts[1].strip()))
         else:
@@ -48,41 +79,61 @@ def _parse_range_to_floats(range_str: Optional[str]) -> Optional[Tuple[float, fl
         return None
 
 def parse_lut_explanation(explanation_str_raw: Optional[Any]) -> LUTExplanationModel:
+    """Parsea la cadena de LUTExplanation en subcampos."""
     if explanation_str_raw is None:
         return LUTExplanationModel(FullText=None)
 
-    text = str(explanation_str_raw)
-    explanation_part = text 
+    text = str(explanation_str_raw) # Asegurar que es una cadena
+    explanation_part = text # Valor por defecto
     in_calib_range_parsed: Optional[Tuple[float, float]] = None
     out_lut_range_parsed: Optional[Tuple[float, float]] = None
 
+    # Ejemplo de cadena: "Kerma uGy (SF=100) InCalibRange:1.00-54.56 OutLUTRange:100-5456"
+    # Usamos regex para intentar capturar las partes
+    # Grupo 1: Explanation (todo hasta "InCalibRange" o "OutLUTRange" o el final)
+    # Grupo 3: Valor de InCalibRange
+    # Grupo 5: Valor de OutLUTRange
     regex_pattern = r"^(.*?)(?:InCalibRange:\s*([0-9\.\-]+))?\s*(?:OutLUTRange:\s*([0-9\.\-]+))?$"
-    match = re.fullmatch(regex_pattern, text.strip())
+    match = re.fullmatch(regex_pattern, text.strip()) # Usar fullmatch para asegurar que toda la cadena coincida
 
     if match:
         explanation_part = match.group(1).strip() if match.group(1) else ""
-        in_calib_range_str = match.group(2) 
+        
+        in_calib_range_str = match.group(2) # Puede ser None si no hay "InCalibRange:"
         if in_calib_range_str:
             in_calib_range_parsed = _parse_range_to_floats(in_calib_range_str.strip())
-        out_lut_range_str = match.group(3)
+
+        out_lut_range_str = match.group(3) # Puede ser None si no hay "OutLUTRange:"
         if out_lut_range_str:
             out_lut_range_parsed = _parse_range_to_floats(out_lut_range_str.strip())
         
+        # Si InCalibRange o OutLUTRange no se encontraron explícitamente
+        # y explanation_part todavía contiene las keywords, intentamos un parseo más simple
+        # (Esto es un fallback, el regex debería ser el método principal)
         if in_calib_range_parsed is None and "InCalibRange:" in explanation_part:
             temp_parts = explanation_part.split("InCalibRange:", 1)
             explanation_part = temp_parts[0].strip()
             if len(temp_parts) > 1:
                 temp_in_calib_parts = temp_parts[1].split("OutLUTRange:", 1)
                 in_calib_range_parsed = _parse_range_to_floats(temp_in_calib_parts[0].strip())
+
         if out_lut_range_parsed is None and "OutLUTRange:" in explanation_part:
             temp_parts = explanation_part.split("OutLUTRange:", 1)
-            if "InCalibRange:" not in temp_parts[0]:
+            # Actualizar explanation_part solo si OutLUTRange se encontró DESPUÉS de InCalibRange
+            if "InCalibRange:" not in temp_parts[0]: # Evitar cortar la explicación si OutLUTRange vino primero o solo
                  explanation_part = temp_parts[0].strip()
             if len(temp_parts) > 1:
                 out_lut_range_parsed = _parse_range_to_floats(temp_parts[1].strip())
     else:
-        logger.warning(f"Regex principal no coincidió para LUTExplanation: '{text}'. Se usará texto completo como explicación.")
-        explanation_part = text
+        # Si el regex principal no coincide, intentamos un parseo más simple basado en split
+        # Esto puede ser menos preciso si el formato de 'explanation_part' es complejo
+        parts = text.split("InCalibRange:")
+        explanation_part = parts[0].strip()
+        if len(parts) > 1:
+            remaining_parts = parts[1].split("OutLUTRange:")
+            in_calib_range_parsed = _parse_range_to_floats(remaining_parts[0].strip())
+            if len(remaining_parts) > 1:
+                out_lut_range_parsed = _parse_range_to_floats(remaining_parts[1].strip())
 
     return LUTExplanationModel(
         FullText=text,
@@ -92,6 +143,7 @@ def parse_lut_explanation(explanation_str_raw: Optional[Any]) -> LUTExplanationM
     )
 
 # --- Endpoints ---
+# ... (tus endpoints @app.get("/") y @app.get("/studies") permanecen igual) ...
 @app.get("/")
 async def root():
     return {"message": "Bienvenido a la API de Consultas PACS DICOM"}
@@ -151,7 +203,7 @@ async def find_series_in_study(study_instance_uid: str):
     identifier.Modality = ""
     identifier.SeriesNumber = "" 
     identifier.SeriesDescription = ""
-    identifier.ImageComments = "" 
+    identifier.ImageComments = ""
 
     pacs_config_dict = {
         "PACS_IP": config.PACS_IP, "PACS_PORT": config.PACS_PORT,
@@ -283,7 +335,7 @@ async def find_instances_in_series(
                     if element.VR == 'SQ': 
                         print(f"[find_instances_in_series] Procesando Secuencia: {key_to_use}")
                         sequence_items = []
-                        if isinstance(element.value, pydicom.sequence.Sequence): # Es pydicom.sequence.Sequence, no MultiValue
+                        if isinstance(element.value, pydicom.sequence.Sequence):
                             for item_index, item_dataset in enumerate(element.value): 
                                 item_data: Dict[str, Any] = {}
                                 print(f"[find_instances_in_series]  Procesando Item #{item_index} de la secuencia {key_to_use}")
@@ -296,26 +348,28 @@ async def find_instances_in_series(
                                         print(f"[find_instances_in_series]    Tag {item_element.tag} ({item_key_in_seq}): LUTData (longitud: {len(item_element.value) if item_element.value is not None else 0})")
                                         continue
                                     
+                                    # --- Parseo específico para LUTExplanation ---
                                     if item_element.tag == Tag(0x0028,0x3003): # LUTExplanation
                                         item_val_in_seq = parse_lut_explanation(item_element.value)
+                                    # --- Fin Parseo específico para LUTExplanation ---
                                     elif item_element.VR == 'PN': item_val_in_seq = str(item_element.value) if item_element.value is not None else ""
                                     elif item_element.VR in ['DA', 'DT', 'TM']: item_val_in_seq = str(item_element.value) if item_element.value is not None else ""
                                     elif item_element.VR == 'IS':
                                         if isinstance(item_element.value, MultiValue): item_val_in_seq = [str(int(v)) for v in item_element.value]
                                         elif item_element.value is not None: item_val_in_seq = str(int(item_element.value))
-                                        else: item_val_in_seq = None # Mantener consistencia
+                                        else: item_val_in_seq = None
                                     elif item_element.VR == 'DS':
                                         if isinstance(item_element.value, MultiValue): item_val_in_seq = [str(float(v)) for v in item_element.value]
                                         elif item_element.value is not None: item_val_in_seq = str(float(item_element.value))
-                                        else: item_val_in_seq = None # Mantener consistencia
+                                        else: item_val_in_seq = None
                                     elif item_element.VR in ['US', 'SS', 'SL', 'UL']:
                                         if isinstance(item_element.value, MultiValue): item_val_in_seq = [int(v) for v in item_element.value]
                                         elif item_element.value is not None: item_val_in_seq = int(item_element.value)
-                                        else: item_val_in_seq = None # Mantener consistencia
+                                        else: item_val_in_seq = None
                                     elif item_element.VR in ['FL', 'FD']:
                                         if isinstance(item_element.value, MultiValue): item_val_in_seq = [float(v) for v in item_element.value]
                                         elif item_element.value is not None: item_val_in_seq = float(item_element.value)
-                                        else: item_val_in_seq = None # Mantener consistencia
+                                        else: item_val_in_seq = None
                                     elif item_element.value is None: item_val_in_seq = None
                                     else: item_val_in_seq = str(item_element.value)
                                     
