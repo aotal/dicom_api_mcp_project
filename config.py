@@ -25,6 +25,11 @@ PACS_IP = "jupyter.arnau.scs.es"  # Dirección IP o hostname de tu servidor PACS
 PACS_PORT = 11112                  # Puerto del servidor PACS
 PACS_AET = "DCM4CHEE"              # AE Title del servidor PACS (destino)
 
+# C-STORE
+API_SCP_AET = "FASTAPI_SCP"  # AE Title de tu API como receptor C-STORE
+API_SCP_PORT = 11115         # Puerto donde escuchará tu API (ejemplo)
+DICOM_RECEIVED_DIR = "./dicom_received" # Directorio para guardar imágenes recibidas
+
 # Configuración del Cliente AE (para nuestra API cuando actúa como SCU)
 CLIENT_AET = "FASTAPI_CLIENT"
 

@@ -4,12 +4,15 @@ import logging
 import os # [cite: 220]
 from pydicom.dataset import Dataset # [cite: 220, 237]
 from pathlib import Path
-from typing import Dict, List, Any, Optional # [cite: 31]
+import functools
+from typing import Dict, List, Any, Optional, Dict, Tuple # [cite: 31]
 
 logger = logging.getLogger(__name__)
 
 import pydicom # [cite: 32]
+from pydicom.dataset import Dataset as DicomDataset
 from pynetdicom import AE, debug_logger, evt, build_context # [cite: 220]
+from pynetdicom.sop_class import StudyRootQueryRetrieveInformationModelFind, StudyRootQueryRetrieveInformationModelMove
 
 from pynetdicom.sop_class import (
     PatientRootQueryRetrieveInformationModelFind,
@@ -152,6 +155,81 @@ def _create_ae_with_contexts(client_aet_title: str, dicom_dataset: Optional[pydi
         logger.error("No se pudo importar la SOP Class 'VerificationSOPClass'. El C-ECHO podría no funcionar.")
     return ae
 
+
+async def perform_c_move_async(
+    identifier: DicomDataset,
+    pacs_config: Dict[str, Any],
+    move_destination_aet: str,
+    query_model_uid: str
+) -> List[Tuple[DicomDataset, Optional[DicomDataset]]]:
+    """
+    Realiza una operación C-MOVE de forma asíncrona.
+    Devuelve una lista de tuplas (status_dataset, identifier_dataset) de las respuestas.
+    """
+    loop = asyncio.get_running_loop()
+    ae_title = pacs_config.get("AE_TITLE", "PYNETDICOM")
+    pacs_ip = pacs_config.get("PACS_IP", "127.0.0.1")
+    pacs_port = pacs_config.get("PACS_PORT", 11112)
+    pacs_aet = pacs_config.get("PACS_AET", "DCM4CHEE")
+
+    logger.info(f"Iniciando C-MOVE hacia {move_destination_aet}...")
+    print(f"[perform_c_move_async] Iniciando C-MOVE...")
+    print(f"[perform_c_move_async] AE Title local: {ae_title}")
+    print(f"[perform_c_move_async] Conectando a PACS: IP={pacs_ip}, Puerto={pacs_port}, AET={pacs_aet}")
+    print(f"[perform_c_move_async] Destino del MOVE: {move_destination_aet}")
+    print(f"[perform_c_move_async] Dataset Identificador para C-MOVE:\n{identifier}")
+
+    if query_model_uid == 'S':
+        model_sop_class = StudyRootQueryRetrieveInformationModelMove
+    else:
+        raise ValueError(f"Modelo de consulta UID '{query_model_uid}' no soportado para C-MOVE.")
+    
+    print(f"[perform_c_move_async] SOP Class UID del modelo de consulta: {model_sop_class}")
+
+    ae = AE(ae_title=ae_title)
+    ae.add_requested_context(model_sop_class)
+    
+    # ... dentro de perform_c_move_async ...
+
+    # Pre-configuramos la llamada a ae.associate con todos sus argumentos
+    associate_callable = functools.partial(
+    ae.associate, 
+    pacs_ip, 
+    pacs_port, 
+    ae_title=pacs_aet
+    )
+    assoc = await loop.run_in_executor(None, associate_callable)
+
+    results = []
+    if assoc.is_established:
+        print("[perform_c_move_async] Asociación establecida para C-MOVE.")
+        
+        responses_generator = await loop.run_in_executor(
+            None,
+            assoc.send_c_move,
+            identifier,
+            move_destination_aet,
+            model_sop_class
+        )
+        
+        for status_ds, returned_identifier_ds in responses_generator:
+            results.append((status_ds, returned_identifier_ds))
+            if status_ds:
+                print(f"[perform_c_move_async] Respuesta C-MOVE Status: 0x{status_ds.Status:04X}")
+                if 'NumberOfRemainingSuboperations' in status_ds:
+                    print(f"  Restantes: {status_ds.NumberOfRemainingSuboperations}, "
+                          f"Completadas: {status_ds.NumberOfCompletedSuboperations}, "
+                          f"Fallidas: {status_ds.NumberOfFailedSuboperations}, "
+                          f"Advertencias: {status_ds.NumberOfWarningSuboperations}")
+        
+        print("[perform_c_move_async] Liberando asociación C-MOVE.")
+        await loop.run_in_executor(None, assoc.release)
+    else:
+        print("[perform_c_move_async] Fallo al establecer asociación C-MOVE.")
+        raise ConnectionError("No se pudo establecer la asociación C-MOVE con el PACS.")
+    
+    print(f"[perform_c_move_async] Operación C-MOVE completada, devolviendo {len(results)} respuestas de estado.")
+    return results
 
 def _perform_pacs_send_sync(
     ae_instance: AE,

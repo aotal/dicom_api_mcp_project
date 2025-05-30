@@ -1,13 +1,22 @@
 # api_main.py
 import logging
 import re 
+import io
+import httpx 
+import os
 from fastapi import FastAPI, HTTPException, Query
-# Los modelos Pydantic ahora se importan desde models.py
-from typing import Any, List, Optional, Dict, Tuple # Tuple es usado por _parse_range_to_floats
+from typing import Any, List, Optional, Dict, Tuple
+import threading # Para ejecutar el SCP en un hilo
+from contextlib import asynccontextmanager # Para el lifespan manager
 
-# Importa tus modelos desde el archivo models.py
-# Usamos una importación directa ya que models.py está en el mismo directorio
-from models import StudyResponse, SeriesResponse, InstanceMetadataResponse, LUTExplanationModel
+from models import ( # Asegúrate de que models.py esté en el mismo directorio
+    StudyResponse, 
+    SeriesResponse, 
+    InstanceMetadataResponse, 
+    LUTExplanationModel,
+    PixelDataResponse,
+    MoveRequest 
+)
 
 import pydicom
 from pydicom.tag import Tag
@@ -18,18 +27,52 @@ from pydicom.multival import MultiValue
 
 import pacs_operations
 import config
+import dicom_scp # Importa tu nuevo módulo SCP
 
 # --- Configuración del Logger ---
 logger = logging.getLogger(__name__)
 if not logger.hasHandlers():
     logging.basicConfig(level=logging.INFO)
 
+# --- Lifespan Manager para iniciar/detener el SCP ---
+scp_thread: Optional[threading.Thread] = None
+# La instancia de AE se crea y gestiona dentro de dicom_scp.py ahora
 
-app = FastAPI(title="API de Consultas PACS DICOM", version="1.0.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global scp_thread
+    logger.info("Iniciando aplicación FastAPI y servidor DICOM C-STORE SCP...")
+    print("[FastAPI App] Iniciando aplicación y servidor DICOM C-STORE SCP...")
+    
+    scp_thread = threading.Thread(target=dicom_scp.start_scp_server, daemon=True)
+    scp_thread.start()
+    
+    yield # La aplicación se ejecuta aquí
 
-# --- Modelos Pydantic YA NO ESTÁN AQUÍ ---
+    logger.info("Deteniendo aplicación FastAPI...")
+    print("[FastAPI App] Deteniendo aplicación FastAPI...")
+    
+    if hasattr(dicom_scp, 'ae_scp') and dicom_scp.ae_scp and dicom_scp.ae_scp.is_running:
+         print("[FastAPI App] Solicitando apagado del servidor SCP...")
+         dicom_scp.ae_scp.shutdown() # Solicita al servidor pynetdicom que se detenga
+    
+    if scp_thread and scp_thread.is_alive():
+        print("[FastAPI App] Esperando que el hilo del SCP termine...")
+        scp_thread.join(timeout=10.0) # Esperar un poco más
+        if scp_thread.is_alive():
+             logger.warning("[FastAPI App] Advertencia: El hilo del servidor SCP no terminó limpiamente después del timeout.")
+             print("[FastAPI App] Advertencia: El hilo del servidor SCP no terminó limpiamente.")
+    print("[FastAPI App] Apagado completado.")
 
-# --- Funciones Auxiliares ---
+
+app = FastAPI(
+    title="API de Consultas PACS DICOM (con C-STORE SCP)", 
+    version="1.1.0", 
+    lifespan=lifespan
+)
+
+# --- Funciones Auxiliares (parse_lut_explanation, etc.) ---
+# (Las funciones _parse_range_to_floats y parse_lut_explanation permanecen igual que en el mensaje #39)
 def _parse_range_to_floats(range_str: Optional[str]) -> Optional[Tuple[float, float]]:
     if not range_str:
         return None
@@ -49,16 +92,13 @@ def _parse_range_to_floats(range_str: Optional[str]) -> Optional[Tuple[float, fl
 
 def parse_lut_explanation(explanation_str_raw: Optional[Any]) -> LUTExplanationModel:
     if explanation_str_raw is None:
-        return LUTExplanationModel(FullText=None)
-
+        return LUTExplanationModel(FullText=None, Explanation=None, InCalibRange=None, OutLUTRange=None)
     text = str(explanation_str_raw)
     explanation_part = text 
     in_calib_range_parsed: Optional[Tuple[float, float]] = None
     out_lut_range_parsed: Optional[Tuple[float, float]] = None
-
     regex_pattern = r"^(.*?)(?:InCalibRange:\s*([0-9\.\-]+))?\s*(?:OutLUTRange:\s*([0-9\.\-]+))?$"
     match = re.fullmatch(regex_pattern, text.strip())
-
     if match:
         explanation_part = match.group(1).strip() if match.group(1) else ""
         in_calib_range_str = match.group(2) 
@@ -67,7 +107,6 @@ def parse_lut_explanation(explanation_str_raw: Optional[Any]) -> LUTExplanationM
         out_lut_range_str = match.group(3)
         if out_lut_range_str:
             out_lut_range_parsed = _parse_range_to_floats(out_lut_range_str.strip())
-        
         if in_calib_range_parsed is None and "InCalibRange:" in explanation_part:
             temp_parts = explanation_part.split("InCalibRange:", 1)
             explanation_part = temp_parts[0].strip()
@@ -83,7 +122,6 @@ def parse_lut_explanation(explanation_str_raw: Optional[Any]) -> LUTExplanationM
     else:
         logger.warning(f"Regex principal no coincidió para LUTExplanation: '{text}'. Se usará texto completo como explicación.")
         explanation_part = text
-
     return LUTExplanationModel(
         FullText=text,
         Explanation=explanation_part if explanation_part else None,
@@ -92,6 +130,8 @@ def parse_lut_explanation(explanation_str_raw: Optional[Any]) -> LUTExplanationM
     )
 
 # --- Endpoints ---
+# (Tus endpoints / , /studies , /studies/.../series , /studies/.../series/.../instances
+# permanecen igual que en el mensaje #41, los incluyo por completitud)
 @app.get("/")
 async def root():
     return {"message": "Bienvenido a la API de Consultas PACS DICOM"}
@@ -192,6 +232,7 @@ async def find_instances_in_series(
     series_instance_uid: str,
     fields: Optional[List[str]] = Query(None, description="Lista de keywords DICOM o (gggg,eeee) a recuperar. E.g., 'PatientName' o '0010,0020'.")
 ):
+    # ... (código de esta función como en el mensaje #41, incluyendo los prints de debug y la lógica de parseo de headers) ...
     print(f"[find_instances_in_series] Recibido fields: {fields}") 
 
     identifier = DicomDataset()
@@ -283,7 +324,7 @@ async def find_instances_in_series(
                     if element.VR == 'SQ': 
                         print(f"[find_instances_in_series] Procesando Secuencia: {key_to_use}")
                         sequence_items = []
-                        if isinstance(element.value, pydicom.sequence.Sequence): # Es pydicom.sequence.Sequence, no MultiValue
+                        if isinstance(element.value, pydicom.sequence.Sequence):
                             for item_index, item_dataset in enumerate(element.value): 
                                 item_data: Dict[str, Any] = {}
                                 print(f"[find_instances_in_series]  Procesando Item #{item_index} de la secuencia {key_to_use}")
@@ -291,31 +332,31 @@ async def find_instances_in_series(
                                     item_key_in_seq = item_element.keyword if item_element.keyword and isinstance(item_element.keyword, str) else str(item_element.tag)
                                     item_val_in_seq: Any = None
 
-                                    if item_element.tag == Tag(0x0028, 0x3006): # LUT Data
+                                    if item_element.tag == Tag(0x0028, 0x3006): 
                                         item_data[item_key_in_seq] = f"Binary LUT data (length {len(item_element.value) if item_element.value is not None else 0}), not included"
                                         print(f"[find_instances_in_series]    Tag {item_element.tag} ({item_key_in_seq}): LUTData (longitud: {len(item_element.value) if item_element.value is not None else 0})")
                                         continue
                                     
-                                    if item_element.tag == Tag(0x0028,0x3003): # LUTExplanation
+                                    if item_element.tag == Tag(0x0028,0x3003): 
                                         item_val_in_seq = parse_lut_explanation(item_element.value)
                                     elif item_element.VR == 'PN': item_val_in_seq = str(item_element.value) if item_element.value is not None else ""
                                     elif item_element.VR in ['DA', 'DT', 'TM']: item_val_in_seq = str(item_element.value) if item_element.value is not None else ""
                                     elif item_element.VR == 'IS':
                                         if isinstance(item_element.value, MultiValue): item_val_in_seq = [str(int(v)) for v in item_element.value]
                                         elif item_element.value is not None: item_val_in_seq = str(int(item_element.value))
-                                        else: item_val_in_seq = None # Mantener consistencia
+                                        else: item_val_in_seq = None
                                     elif item_element.VR == 'DS':
                                         if isinstance(item_element.value, MultiValue): item_val_in_seq = [str(float(v)) for v in item_element.value]
                                         elif item_element.value is not None: item_val_in_seq = str(float(item_element.value))
-                                        else: item_val_in_seq = None # Mantener consistencia
+                                        else: item_val_in_seq = None
                                     elif item_element.VR in ['US', 'SS', 'SL', 'UL']:
                                         if isinstance(item_element.value, MultiValue): item_val_in_seq = [int(v) for v in item_element.value]
                                         elif item_element.value is not None: item_val_in_seq = int(item_element.value)
-                                        else: item_val_in_seq = None # Mantener consistencia
+                                        else: item_val_in_seq = None
                                     elif item_element.VR in ['FL', 'FD']:
                                         if isinstance(item_element.value, MultiValue): item_val_in_seq = [float(v) for v in item_element.value]
                                         elif item_element.value is not None: item_val_in_seq = float(item_element.value)
-                                        else: item_val_in_seq = None # Mantener consistencia
+                                        else: item_val_in_seq = None
                                     elif item_element.value is None: item_val_in_seq = None
                                     else: item_val_in_seq = str(item_element.value)
                                     
@@ -360,3 +401,119 @@ async def find_instances_in_series(
     except Exception as e:
         logger.error(f"Error en C-FIND de instancias: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error interno al consultar instancias: {str(e)}")
+
+@app.post("/retrieve-instance", status_code=202)
+async def retrieve_instance_via_cmove(item: MoveRequest):
+    """
+    Inicia una petición C-MOVE para mover una o más instancias a nuestro SCP.
+    """
+    identifier = DicomDataset()
+    
+    # Añadir siempre los UIDs de los niveles superiores que se proporcionan
+    identifier.StudyInstanceUID = item.study_instance_uid
+    
+    if item.sop_instance_uid:
+        # --- CORRECCIÓN AQUÍ ---
+        # Si se mueve una instancia específica, se requieren TODOS los UIDs de la jerarquía.
+        if not item.series_instance_uid:
+            raise HTTPException(status_code=400, detail="SeriesInstanceUID es requerido para mover una instancia específica.")
+        
+        identifier.QueryRetrieveLevel = "IMAGE"
+        identifier.SeriesInstanceUID = item.series_instance_uid
+        identifier.SOPInstanceUID = item.sop_instance_uid
+        
+    elif item.series_instance_uid:
+        identifier.QueryRetrieveLevel = "SERIES"
+        identifier.SeriesInstanceUID = item.series_instance_uid
+        identifier.SOPInstanceUID = "" # Universal matching a nivel de instancia
+    elif item.study_instance_uid:
+        identifier.QueryRetrieveLevel = "STUDY"
+        identifier.SeriesInstanceUID = "" # Universal matching
+        identifier.SOPInstanceUID = ""    # Universal matching
+    else:
+        raise HTTPException(status_code=400, detail="Se requiere al menos StudyInstanceUID.")
+
+    identifier.StudyInstanceUID = item.study_instance_uid
+    if 'SeriesInstanceUID' in identifier and item.series_instance_uid:
+         identifier.SeriesInstanceUID = item.series_instance_uid
+
+    pacs_config_dict = {
+        "PACS_IP": config.PACS_IP,
+        "PACS_PORT": config.PACS_PORT,
+        "PACS_AET": config.PACS_AET,
+        "AE_TITLE": config.CLIENT_AET 
+    }
+    
+    move_destination = config.API_SCP_AET
+
+    try:
+        move_responses = await pacs_operations.perform_c_move_async(
+            identifier,
+            pacs_config_dict,
+            move_destination_aet=move_destination,
+            query_model_uid='S' # Asumiendo Study Root
+        )
+        
+        final_status_ds = move_responses[-1][0] if move_responses else None
+        if final_status_ds and final_status_ds.Status == 0x0000:
+            num_completed = final_status_ds.get("NumberOfCompletedSuboperations", 0)
+            return {"message": f"Solicitud C-MOVE aceptada por el PACS para enviar {num_completed} instancia(s) a {move_destination}."}
+        else:
+            status_val = final_status_ds.Status if final_status_ds else 'desconocido'
+            logger.error(f"C-MOVE falló o tuvo advertencias. Estado final: {status_val}")
+            raise HTTPException(status_code=500, detail=f"C-MOVE falló o tuvo advertencias. Estado final del PACS: {status_val}")
+
+    except ConnectionError as e:
+        logger.error(f"Error de conexión C-MOVE: {e}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error de conexión al PACS para C-MOVE: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error al solicitar C-MOVE: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor durante C-MOVE: {str(e)}")
+
+
+@app.get("/retrieved-instances/{sop_instance_uid}/pixeldata", response_model=PixelDataResponse)
+async def get_retrieved_instance_pixeldata(sop_instance_uid: str):
+    """
+    Recupera el array de píxeles de un archivo DICOM que ha sido previamente
+    recibido por el C-STORE SCP de la API.
+    """
+    filepath = os.path.join(config.DICOM_RECEIVED_DIR, sop_instance_uid + ".dcm")
+    
+    print(f"[get_retrieved_instance_pixeldata] Buscando archivo: {filepath}")
+
+    if not os.path.exists(filepath):
+        logger.warning(f"Archivo DICOM no encontrado en el directorio de recepción: {filepath}")
+        raise HTTPException(status_code=404, detail="Archivo DICOM no encontrado. Es posible que C-MOVE no haya completado, fallado, o aún no haya llegado.")
+
+    try:
+        ds = pydicom.dcmread(filepath, force=True)
+        
+        if not hasattr(ds, 'PixelData') or ds.PixelData is None:
+            raise HTTPException(status_code=404, detail="El objeto DICOM no contiene datos de píxeles (PixelData) válidos.")
+
+        pixel_array = ds.pixel_array
+        
+        logger.info(f"Array de píxeles obtenido del archivo {filepath}: forma={pixel_array.shape}, tipo={pixel_array.dtype}")
+        print(f"[get_retrieved_instance_pixeldata] Array de píxeles obtenido: forma={pixel_array.shape}, tipo={pixel_array.dtype}")
+
+        preview = None
+        if pixel_array.ndim >= 2 and pixel_array.size > 0:
+            rows_preview = min(pixel_array.shape[0], 5)
+            cols_preview = min(pixel_array.shape[1], 5)
+            if pixel_array.ndim == 2:
+                preview = pixel_array[:rows_preview, :cols_preview].tolist()
+            elif pixel_array.ndim == 3:
+                preview = pixel_array[0, :rows_preview, :cols_preview].tolist()
+        
+        return PixelDataResponse(
+            sop_instance_uid=sop_instance_uid,
+            rows=ds.Rows,
+            columns=ds.Columns,
+            pixel_array_shape=pixel_array.shape,
+            pixel_array_dtype=str(pixel_array.dtype),
+            pixel_array_preview=preview,
+            message="Pixel data accessed from locally stored C-MOVE file. Preview shown."
+        )
+    except Exception as e:
+        logger.error(f"Error procesando archivo DICOM almacenado {filepath}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error interno al procesar archivo DICOM almacenado: {str(e)}")
