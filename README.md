@@ -1,26 +1,9 @@
 uvicorn api_main:app --reload
 
-[
-  {
-    "StudyInstanceUID": "1.3.46.670589.30.41.0.1.128635482625724.1743412743040.1",
-    "SeriesInstanceUID": "1.3.46.670589.30.41.0.1.128635482625724.1743412778135.1",
-    "Modality": "DX",
-    "SeriesNumber": "1",
-    "SeriesDescription": "Objeto de prueba universal",
-    "ImageComments": null
-  }
-]
+http://127.0.0.1:8000/studies/1.3.46.670589.30.41.0.1.128635484509658.1741345579235.1/series/1.3.46.670589.30.41.0.1.128635484509658.1741345726574.1/instances?fields=ImageComments&fields=ModalityLUTSequence&fields=StudyDate&fields=StudyTime
 
-http://127.0.0.1:8000/studies/1.3.46.670589.30.41.0.1.128635482625724.1743412743040.1/series/1.3.46.670589.30.41.0.1.128635482625724.1743412778135.1/instances?fields=ModalityLUTSequence&fields=ImageComments&fields=PatientName
-
-http://127.0.0.1:8000/studies/1.3.46.670589.30.41.0.1.128635482625724.1743412743040.1/series/1.3.46.670589.30.41.0.1.128635482625724.1743412778135.1/instances/1.3.46.670589.30.41.0.1.128635482625724.1743414241688.1/pixeldata
-
-curl -v ["LA_BULK_DATA_URI_COMPLETA_AQUI"](http://127.0.0.1:8000/studies/1.3.46.670589.30.41.0.1.128635482625724.1743412743040.1/series/1.3.46.670589.30.41.0.1.128635482625724.1743412778135.1/instances/1.3.46.670589.30.41.0.1.128635482625724.1743414241688.1/pixeldata --output pixel_data.bin 
-
-/rs/studies/{StudyInstanceUID}/series/{SeriesInstanceUID}/instances/{SOPInstanceUID}
-
-http://jupyter.arnau.scs.es:8000/dcm4chee-arc/aets/DCM4CHEE/rs/series/1.3.46.670589.30.41.0.1.128635482625724.1743412778135.1/instances/1.3.46.670589.30.41.0.1.128635482625724.1743414241688.1/
-
-
-
-curl -v "http://jupyter.arnau.scs.es:8080/dcm4chee-arc/aets/DCM4CHEE/rs/studies/1.3.46.670589.30.41.0.1.128635482625724.1743412743040.1/series/1.3.46.670589.30.41.0.1.128635482625724.1743412778135.1/instances/1.3.46.670589.30.41.0.1.128635482625724.1743414241688.1/bulk/7FE00010" --output pixel_data.bin
+{
+  "study_instance_uid": "1.3.46.670589.30.41.0.1.128635484509658.1741345579235.1",
+  "series_instance_uid": "1.3.46.670589.30.41.0.1.128635484509658.1741345726574.1",
+  "sop_instance_uid": "1.2.826.0.1.3680043.8.498.42044900197124354928246201361539914993"
+}
