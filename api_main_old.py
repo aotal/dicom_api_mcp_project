@@ -56,7 +56,6 @@ class SeriesResponse(BaseModel):
     Modality: Optional[str] = None
     SeriesNumber: Optional[str] = None
     SeriesDescription: Optional[str] = None
-    ImageComments: Optional[str] = None
 
 
 # --- Funciones Auxiliares ---
@@ -203,7 +202,6 @@ async def find_series_in_study(study_instance_uid: str):
     identifier.Modality = ""
     identifier.SeriesNumber = "" 
     identifier.SeriesDescription = ""
-    identifier.ImageComments = ""
 
     pacs_config_dict = {
         "PACS_IP": config.PACS_IP, "PACS_PORT": config.PACS_PORT,
@@ -223,7 +221,7 @@ async def find_series_in_study(study_instance_uid: str):
                 except (ValueError, TypeError):
                     series_number_for_pydantic = str(series_number_raw)
             
-            image_comments_val = res_ds.get("ImageComments")
+            kvp_val = res_ds.get("KVP")
 
             response_list.append(SeriesResponse(
                 StudyInstanceUID=res_ds.get("StudyInstanceUID", study_instance_uid),
@@ -231,7 +229,7 @@ async def find_series_in_study(study_instance_uid: str):
                 Modality=res_ds.get("Modality", ""),
                 SeriesNumber=series_number_for_pydantic,
                 SeriesDescription=res_ds.get("SeriesDescription", ""),
-                ImageComments=str(image_comments_val) if image_comments_val is not None else None
+                KVP=str(kvp_val) if kvp_val is not None else None
             ))
         return response_list
     except Exception as e:

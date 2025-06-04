@@ -28,7 +28,6 @@ class SeriesResponse(BaseModel):
     Modality: Optional[str] = None
     SeriesNumber: Optional[str] = None
     SeriesDescription: Optional[str] = None
-    ImageComments: Optional[str] = None
 
 class PixelDataResponse(BaseModel):
     sop_instance_uid: str
@@ -45,3 +44,18 @@ class MoveRequest(BaseModel):
     sop_instance_uid: Optional[str] = None # Para mover una instancia específica
     # El destino será el AET de nuestro propio SCP
     # destination_aet: str # No es necesario si siempre es nuestro propio SCP    
+
+class IndividualInstanceMoveRequest(BaseModel):
+    study_instance_uid: str = Field(..., description="Study Instance UID de la instancia a mover.")
+    series_instance_uid: str = Field(..., description="Series Instance UID de la instancia a mover.")
+    sop_instance_uid: str = Field(..., description="SOP Instance UID de la instancia específica a mover.")
+
+class BulkMoveRequest(BaseModel):
+    instances_to_move: List[IndividualInstanceMoveRequest] = Field(..., description="Lista de instancias específicas a mover.")
+    # Opcionalmente, podrías añadir aquí el AET de destino si fuese dinámico,
+    # pero según tu config.py, es fijo.
+    # destination_aet: Optional[str] = None 
+
+# Asegúrate de que el MoveRequest original se mantiene o se elimina/reemplaza según tu necesidad.
+# Si quieres mantener la funcionalidad de mover un estudio/serie completo con el endpoint antiguo,
+# puedes crear un nuevo endpoint para el movimiento masivo de instancias.  
