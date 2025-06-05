@@ -1,9 +1,24 @@
 # api_main.py
 import logging
 import re
+import os
 from fastapi import FastAPI, HTTPException, Query
+from starlette.responses import FileResponse # Importa FileResponse
 from pydantic import BaseModel, Field
 from typing import Any, List, Optional, Dict, Tuple # Añadido Tuple
+import threading
+from contextlib import asynccontextmanager
+
+from models import (
+    StudyResponse, 
+    SeriesResponse, 
+    InstanceMetadataResponse, 
+    LUTExplanationModel,
+    PixelDataResponse,
+    MoveRequest, # Si mantienes el endpoint original
+    BulkMoveRequest # Nuevo modelo para múltiples instancias
+)    
+
 
 import pydicom
 from pydicom.tag import Tag
@@ -11,52 +26,51 @@ from pydicom.dataset import Dataset as DicomDataset
 from pydicom.datadict import dictionary_VR, tag_for_keyword
 from pydicom.dataelem import DataElement
 from pydicom.multival import MultiValue
+from pydicom.dataset import Dataset as DicomDataset # Asegúrate que DicomDataset está importado
 
 import pacs_operations
 import config
+import dicom_scp
 
 # --- Configuración del Logger ---
 logger = logging.getLogger(__name__)
 if not logger.hasHandlers():
     logging.basicConfig(level=logging.INFO)
 
+# --- Lifespan Manager para iniciar/detener el SCP ---
+scp_thread: Optional[threading.Thread] = None
 
-app = FastAPI(title="API de Consultas PACS DICOM", version="1.0.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI): # Renombrado el parámetro para claridad
+    global scp_thread
+    logger.info("Iniciando aplicación FastAPI y servidor DICOM C-STORE SCP...")
+    print("[FastAPI App] Iniciando aplicación y servidor DICOM C-STORE SCP...")
+    
+    scp_thread = threading.Thread(target=dicom_scp.start_scp_server, daemon=True)
+    scp_thread.start()
+    
+    yield 
 
-# --- Modelos Pydantic ---
-class StudyResponse(BaseModel):
-    StudyInstanceUID: str
-    PatientID: Optional[str] = None
-    PatientName: Optional[str] = None
-    StudyDate: Optional[str] = None
-    StudyDescription: Optional[str] = None
-    ModalitiesInStudy: Optional[str] = None
-    AccessionNumber: Optional[str] = None
+    logger.info("Deteniendo aplicación FastAPI...")
+    print("[FastAPI App] Deteniendo aplicación FastAPI...")
+    
+    if hasattr(dicom_scp, 'ae_scp') and dicom_scp.ae_scp and dicom_scp.ae_scp.is_running:
+         print("[FastAPI App] Solicitando apagado del servidor SCP...")
+         dicom_scp.ae_scp.shutdown() 
+    
+    if scp_thread and scp_thread.is_alive():
+        print("[FastAPI App] Esperando que el hilo del SCP termine...")
+        scp_thread.join(timeout=10.0) 
+        if scp_thread.is_alive():
+             logger.warning("[FastAPI App] Advertencia: El hilo del servidor SCP no terminó limpiamente.")
+    print("[FastAPI App] Apagado completado.")
 
-class LUTExplanationModel(BaseModel):
-    FullText: Optional[str] = None
-    Explanation: Optional[str] = None
-    InCalibRange: Optional[Tuple[float, float]] = None # MODIFICADO
-    OutLUTRange: Optional[Tuple[float, float]] = None  # MODIFICADO
 
-class ModalityLUTItemModel(BaseModel):
-    LUTDescriptor: Optional[List[int]] = None
-    LUTExplanation: Optional[LUTExplanationModel] = None
-    ModalityLUTType: Optional[str] = None
-    LUTData: Optional[str] = None
-
-class InstanceMetadataResponse(BaseModel):
-    SOPInstanceUID: str
-    InstanceNumber: Optional[str] = None
-    dicom_headers: Dict[str, Any]
-
-class SeriesResponse(BaseModel):
-    StudyInstanceUID: str
-    SeriesInstanceUID: str
-    Modality: Optional[str] = None
-    SeriesNumber: Optional[str] = None
-    SeriesDescription: Optional[str] = None
-
+app = FastAPI(
+    title="API de Consultas PACS DICOM (con C-STORE SCP y Filtros Dinámicos)", 
+    version="1.2.0", 
+    lifespan=lifespan
+)
 
 # --- Funciones Auxiliares ---
 def _parse_range_to_floats(range_str: Optional[str]) -> Optional[Tuple[float, float]]:
@@ -146,6 +160,10 @@ def parse_lut_explanation(explanation_str_raw: Optional[Any]) -> LUTExplanationM
 @app.get("/")
 async def root():
     return {"message": "Bienvenido a la API de Consultas PACS DICOM"}
+
+@app.get("/favicon.ico", include_in_schema=False) # include_in_schema=False para que no aparezca en la documentación de OpenAPI
+async def favicon():
+    return FileResponse("xray.ico") # Asegúrate de que esta ruta sea correcta
 
 @app.get("/studies", response_model=List[StudyResponse])
 async def find_studies_endpoint(
@@ -412,3 +430,186 @@ async def find_instances_in_series(
     except Exception as e:
         logger.error(f"Error en C-FIND de instancias: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error interno al consultar instancias: {str(e)}")
+    
+# --- Endpoints para C-MOVE y Acceso a Píxeles Recibidos ---
+@app.post("/retrieve-instance", status_code=202, summary="Solicita al PACS mover instancias a esta API")
+async def retrieve_instance_via_cmove(item: MoveRequest):
+    identifier = DicomDataset()
+    identifier.StudyInstanceUID = item.study_instance_uid
+    if item.sop_instance_uid:
+        if not item.series_instance_uid:
+            raise HTTPException(status_code=400, detail="SeriesInstanceUID es requerido para mover una instancia específica.")
+        identifier.QueryRetrieveLevel = "IMAGE"
+        identifier.SeriesInstanceUID = item.series_instance_uid
+        identifier.SOPInstanceUID = item.sop_instance_uid
+    elif item.series_instance_uid:
+        identifier.QueryRetrieveLevel = "SERIES"
+        identifier.SeriesInstanceUID = item.series_instance_uid
+        identifier.SOPInstanceUID = "" 
+    elif item.study_instance_uid:
+        identifier.QueryRetrieveLevel = "STUDY"
+        identifier.SeriesInstanceUID = "" 
+        identifier.SOPInstanceUID = ""    
+    else:
+        raise HTTPException(status_code=400, detail="Se requiere al menos StudyInstanceUID.")
+
+    pacs_config_dict = {
+        "PACS_IP": config.PACS_IP, "PACS_PORT": config.PACS_PORT,
+        "PACS_AET": config.PACS_AET, "AE_TITLE": config.CLIENT_AET 
+    }
+    move_destination = config.API_SCP_AET
+    try:
+        move_responses = await pacs_operations.perform_c_move_async(
+            identifier, pacs_config_dict, move_destination_aet=move_destination, query_model_uid='S'
+        )
+        final_status_ds = move_responses[-1][0] if move_responses else None
+        if final_status_ds and hasattr(final_status_ds, 'Status'):
+            status_val = final_status_ds.Status
+            if status_val == 0x0000:
+                num_completed = final_status_ds.get("NumberOfCompletedSuboperations", 0)
+                return {"message": f"Solicitud C-MOVE aceptada por el PACS. Sub-operaciones completadas (según PACS): {num_completed}."}
+            else:
+                logger.error(f"C-MOVE falló o tuvo advertencias. Estado final del PACS: 0x{status_val:04X}")
+                raise HTTPException(status_code=500, detail=f"C-MOVE falló o tuvo advertencias. Estado final del PACS: 0x{status_val:04X}")
+        else:
+            logger.error("No se recibió una respuesta de estado final válida o completa del C-MOVE.")
+            raise HTTPException(status_code=500, detail="Respuesta C-MOVE incompleta o no exitosa del PACS.")
+    except ConnectionError as e:
+        logger.error(f"Error de conexión C-MOVE: {e}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error de conexión al PACS para C-MOVE: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error al solicitar C-MOVE: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor durante C-MOVE: {str(e)}")
+
+@app.post("/retrieve-multiple-instances", status_code=202, summary="Solicita al PACS mover múltiples instancias específicas a esta API")
+async def retrieve_multiple_instances_via_cmove(request_data: BulkMoveRequest):
+    pacs_config_dict = {
+        "PACS_IP": config.PACS_IP,
+        "PACS_PORT": config.PACS_PORT,
+        "PACS_AET": config.PACS_AET,
+        "AE_TITLE": config.CLIENT_AET  # El AE Title de esta API como cliente SCU
+    }
+    move_destination_aet = config.API_SCP_AET # El AE Title de esta API como servidor SCP
+
+    responses_summary = []
+    overall_success = True
+    
+    if not request_data.instances_to_move:
+        raise HTTPException(status_code=400, detail="La lista 'instances_to_move' no puede estar vacía.")
+
+    for instance_info in request_data.instances_to_move:
+        identifier = DicomDataset()
+        identifier.QueryRetrieveLevel = "IMAGE" # Siempre a nivel de imagen para instancias específicas
+        identifier.StudyInstanceUID = instance_info.study_instance_uid
+        identifier.SeriesInstanceUID = instance_info.series_instance_uid
+        identifier.SOPInstanceUID = instance_info.sop_instance_uid
+        
+        instance_response = {
+            "sop_instance_uid": instance_info.sop_instance_uid,
+            "status_code": None, # Código de estado DICOM
+            "message": ""
+        }
+
+        try:
+            logger.info(f"Iniciando C-MOVE para SOPInstanceUID: {instance_info.sop_instance_uid} hacia {move_destination_aet}")
+            
+            # perform_c_move_async espera 'S' o 'P' para query_model_uid.
+            # Para C-MOVE a nivel de IMAGE, el modelo raíz (StudyRoot o PatientRoot) sigue siendo relevante.
+            # Usaremos 'S' para StudyRootQueryRetrieveInformationModelMove.
+            move_responses = await pacs_operations.perform_c_move_async(
+                identifier,
+                pacs_config_dict,
+                move_destination_aet=move_destination_aet,
+                query_model_uid='S' 
+            )
+            
+            # Analizar la respuesta del C-MOVE para esta instancia
+            # El generador devuelve tuplas (status_dataset, identifier_dataset)
+            # La última respuesta de estado es la más importante.
+            final_status_ds = None
+            num_completed = 0
+            num_failed = 0
+            num_warning = 0
+
+            for status_ds, _ in move_responses:
+                if status_ds:
+                    final_status_ds = status_ds # Actualiza al último estado recibido
+                    num_completed = status_ds.get("NumberOfCompletedSuboperations", num_completed)
+                    num_failed = status_ds.get("NumberOfFailedSuboperations", num_failed)
+                    num_warning = status_ds.get("NumberOfWarningSuboperations", num_warning)
+            
+            if final_status_ds and hasattr(final_status_ds, 'Status'):
+                status_val = final_status_ds.Status
+                instance_response["status_code"] = f"0x{status_val:04X}"
+                if status_val == 0x0000: # Éxito
+                    instance_response["message"] = (
+                        f"C-MOVE para {instance_info.sop_instance_uid} exitoso. "
+                        f"Completadas: {num_completed}, Fallidas: {num_failed}, Advertencias: {num_warning}."
+                    )
+                    logger.info(instance_response["message"])
+                else: # Fallo o advertencia en la operación C-MOVE
+                    overall_success = False
+                    instance_response["message"] = (
+                        f"C-MOVE para {instance_info.sop_instance_uid} con estado final {status_val:#04X}. "
+                        f"Completadas: {num_completed}, Fallidas: {num_failed}, Advertencias: {num_warning}."
+                    )
+                    logger.warning(instance_response["message"])
+            else: # No se recibió respuesta de estado clara
+                overall_success = False
+                instance_response["status_code"] = "N/A"
+                instance_response["message"] = f"No se recibió estado final para C-MOVE de {instance_info.sop_instance_uid}."
+                logger.error(instance_response["message"])
+
+        except ConnectionError as e_conn:
+            overall_success = False
+            logger.error(f"Error de conexión durante C-MOVE para {instance_info.sop_instance_uid}: {e_conn}", exc_info=True)
+            instance_response["message"] = f"Error de conexión: {str(e_conn)}"
+        except Exception as e_generic:
+            overall_success = False
+            logger.error(f"Error genérico durante C-MOVE para {instance_info.sop_instance_uid}: {e_generic}", exc_info=True)
+            instance_response["message"] = f"Error interno del servidor: {str(e_generic)}"
+        
+        responses_summary.append(instance_response)
+
+    # Devolver un resumen de todas las operaciones
+    # Podrías usar un código HTTP diferente si algunas operaciones fallan (ej. 207 Multi-Status)
+    # pero FastAPI no lo maneja nativamente de forma simple. 202 sigue indicando que la solicitud fue aceptada para procesamiento.
+    return {
+        "overall_status": "Éxito parcial" if not overall_success and any(r.get("status_code") == "0x0000" for r in responses_summary) else ("Fallo" if not overall_success else "Éxito"),
+        "summary": responses_summary
+    }
+
+@app.get("/retrieved-instances/{sop_instance_uid}/pixeldata", response_model=PixelDataResponse, summary="Obtiene datos de píxeles de una instancia recibida localmente")
+async def get_retrieved_instance_pixeldata(sop_instance_uid: str):
+    filepath = os.path.join(config.DICOM_RECEIVED_DIR, sop_instance_uid + ".dcm")
+    print(f"[get_retrieved_instance_pixeldata] Buscando archivo: {filepath}")
+    if not os.path.exists(filepath):
+        logger.warning(f"Archivo DICOM no encontrado en el directorio de recepción: {filepath}")
+        raise HTTPException(status_code=404, detail="Archivo DICOM no encontrado. Es posible que C-MOVE no haya completado, fallado, o aún no haya llegado.")
+    try:
+        ds = pydicom.dcmread(filepath, force=True)
+        if not hasattr(ds, 'PixelData') or ds.PixelData is None:
+            raise HTTPException(status_code=404, detail="El objeto DICOM no contiene datos de píxeles (PixelData) válidos.")
+        pixel_array = ds.pixel_array
+        logger.info(f"Array de píxeles obtenido del archivo {filepath}: forma={pixel_array.shape}, tipo={pixel_array.dtype}")
+        print(f"[get_retrieved_instance_pixeldata] Array de píxeles obtenido: forma={pixel_array.shape}, tipo={pixel_array.dtype}")
+        preview = None
+        if pixel_array.ndim >= 2 and pixel_array.size > 0:
+            rows_preview = min(pixel_array.shape[0], 5)
+            cols_preview = min(pixel_array.shape[1], 5)
+            if pixel_array.ndim == 2:
+                preview = pixel_array[:rows_preview, :cols_preview].tolist()
+            elif pixel_array.ndim == 3:
+                preview = pixel_array[0, :rows_preview, :cols_preview].tolist()
+        return PixelDataResponse(
+            sop_instance_uid=sop_instance_uid,
+            rows=ds.Rows,
+            columns=ds.Columns,
+            pixel_array_shape=pixel_array.shape,
+            pixel_array_dtype=str(pixel_array.dtype),
+            pixel_array_preview=preview,
+            message="Pixel data accessed from locally stored C-MOVE file. Preview shown."
+        )
+    except Exception as e:
+        logger.error(f"Error procesando archivo DICOM almacenado {filepath}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error interno al procesar archivo DICOM almacenado: {str(e)}")    

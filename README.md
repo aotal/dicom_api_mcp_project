@@ -17,6 +17,20 @@ XrayTubeCurrent
 ]
 
 
+http://jupyter.arnau.scs.es:8080/dicom-web/
+
+http://jupyter.arnau.scs.es:8080/dcm4chee-arc/aets/DCM4CHEE/rs
+
+
+curl -X GET "http://jupyter.arnau.scs.es:8000/dicom-web/studies/1.3.46.670589.30.41.0.1.128635482625724.1743412743040.1/series/1.3.46.670589.30.41.0.1.128635482625724.1743412778135.1/instances?ImageComments="MTF"
+
+curl -X GET "http://jupyter.arnau.scs.es:8000/dicom-web/studies/1.3.46.670589.30.41.0.1.128635482625724.1743412743040.1/series/1.3.46.670589.30.41.0.1.128635482625724.1743412778135.1/instances?ImageComments=MTF&includefield=QC_Convencional"
+
+
+curl "http://jupyter.arnau.scs.es:8080/dcm4chee-arc/aets/DCM4CHEE/rs/studies/1.3.46.670589.30.41.0.1.128635482625724.1743412743040.1/series/1.3.46.670589.30.41.0.1.128635482625724.1743412778135.1/instances?includefield=QC_Convencional"
+
+curl "http://jupyter.arnau.scs.es:8000/dicom-web/studies/1.3.46.670589.30.41.0.1.128635482625724.1743412743040.1/series/1.3.46.670589.30.41.0.1.128635482625724.1743412778135.1/instances?includefield=QC_Convencional"
+
 {
   "instances_to_move": [
 {
@@ -42,3 +56,8 @@ XrayTubeCurrent
     "SeriesDescription": "Objeto de prueba universal"
   }
 ]
+
+
+curl -X GET \
+  -H "Accept: application/dicom+json" \
+  "http://jupyter.arnau.scs.es:11112/dcm4chee-arc/aets/DCM4CHEE/rs/instances?00180060=70-80&00204000=*MTF*&00181151=120&includefield=SOPInstanceUID,KVP,XRayTubeCurrent,ImageComments,PatientID&limit=10"
