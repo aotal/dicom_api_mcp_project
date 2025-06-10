@@ -1,31 +1,32 @@
 # api_main.py
 import logging
-import re
+import re 
 import io
 import os
-import json
-from fastapi import FastAPI, HTTPException, Query, Request
-from starlette.responses import JSONResponse, FileResponse
-from typing import Any, List, Optional, Dict, Tuple
+import json # Para parsear filtros JSON
+from fastapi import FastAPI, HTTPException, Query
+from starlette.responses import FileResponse # Para favicon
+from typing import Any, List, Optional, Dict, Tuple, Union # Añadido Union
 import threading
 from contextlib import asynccontextmanager
-import httpx
 
-# --- NUEVAS IMPORTACIONES ---
-import pynetdicom # <--- AÑADIDO PARA RESOLVER EL NameError
 from models import (
-    StudyResponse,
-    SeriesResponse,
-    InstanceMetadataResponse,
-    LUTExplanationModel,      # <-- AÑADIDO
-    PixelDataResponse,        # <-- AÑADIDO
-    MoveRequest,
-    BulkMoveRequest
+    StudyResponse, 
+    SeriesResponse, 
+    InstanceMetadataResponse, 
+    LUTExplanationModel,
+    PixelDataResponse,
+    MoveRequest, # Modelo original para C-MOVE singular/jerárquico
+    BulkMoveRequest # Modelo para C-MOVE de múltiples instancias específicas
 )
-# ... (el resto del fichero permanece igual que en la versión que te proporcioné)
-from pydicom.dataset import Dataset as DicomDataset
+
+import pydicom
 from pydicom.tag import Tag
-from pydicom.datadict import keyword_for_tag, tag_for_keyword
+from pydicom.datadict import keyword_for_tag, tag_for_keyword, dictionary_VR
+from pydicom.dataset import Dataset as DicomDataset
+from pydicom.datadict import dictionary_VR # Necesario para la lógica de 'fields'
+from pydicom.dataelem import DataElement
+from pydicom.multival import MultiValue
 
 import pacs_operations
 import config
@@ -33,134 +34,531 @@ import dicom_scp
 
 # --- Configuración del Logger ---
 logger = logging.getLogger(__name__)
-if not logger.hasHandlers():
+if not logger.hasHandlers(): # Evitar añadir múltiples handlers si se importa o recarga
+    # Configuración básica si no hay handlers. Considera usar la de utils.py para consistencia.
     logging.basicConfig(
-        level=config.LOG_LEVEL,
-        format=config.LOG_FORMAT,
-        force=True
+        level=config.LOG_LEVEL, # Usar nivel de config.py
+        format=config.LOG_FORMAT, # Usar formato de config.py
+        force=True # Para asegurar que se reconfigure si se llama varias veces
     )
 
-# --- Lifespan Manager (Corregido) ---
+# --- Lifespan Manager para iniciar/detener el SCP ---
 scp_thread: Optional[threading.Thread] = None
-# La anotación de tipo ahora funcionará
-scp_server_instance: Optional[pynetdicom.AE] = None
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    global scp_thread, scp_server_instance
+async def lifespan(app_lifespan: FastAPI): # Renombrado el parámetro para claridad
+    global scp_thread
     logger.info("Iniciando aplicación FastAPI y servidor DICOM C-STORE SCP...")
+    print("[FastAPI App] Iniciando aplicación y servidor DICOM C-STORE SCP...")
     
-    # El callback ahora puede asignar la instancia del servidor AE de pynetdicom
-    def server_callback(server_instance):
-        globals()['scp_server_instance'] = server_instance
-
-    scp_thread = threading.Thread(
-        target=dicom_scp.start_scp_server,
-        args=(server_callback,),
-        daemon=True
-    )
+    scp_thread = threading.Thread(target=dicom_scp.start_scp_server, daemon=True)
     scp_thread.start()
-
-    yield
+    
+    yield 
 
     logger.info("Deteniendo aplicación FastAPI...")
+    print("[FastAPI App] Deteniendo aplicación FastAPI...")
     
-    if scp_server_instance:
-        logger.info("Solicitando apagado del servidor SCP...")
-        scp_server_instance.shutdown()
-
+    if hasattr(dicom_scp, 'ae_scp') and dicom_scp.ae_scp and dicom_scp.ae_scp.is_running:
+         print("[FastAPI App] Solicitando apagado del servidor SCP...")
+         dicom_scp.ae_scp.shutdown() 
+    
     if scp_thread and scp_thread.is_alive():
-        logger.info("Esperando que el hilo del SCP termine...")
-        scp_thread.join(timeout=5.0)
+        print("[FastAPI App] Esperando que el hilo del SCP termine...")
+        scp_thread.join(timeout=10.0) 
         if scp_thread.is_alive():
-            logger.warning("Advertencia: El hilo del servidor SCP no terminó limpiamente.")
-    logger.info("Apagado completado.")
+             logger.warning("[FastAPI App] Advertencia: El hilo del servidor SCP no terminó limpiamente.")
+    print("[FastAPI App] Apagado completado.")
 
 
 app = FastAPI(
-    title="API Gateway para Consultas DICOM (QIDO-RS & DIMSE)",
-    version="2.0.1", # Incremento de versión por la corrección
-    description="Actúa como un proxy para QIDO-RS y un endpoint para C-FIND/C-MOVE.",
+    title="API de Consultas PACS DICOM (con C-STORE SCP y Filtros Dinámicos)", 
+    version="1.3.0", # Versión incrementada para reflejar cambios
     lifespan=lifespan
 )
 
-# ... (El resto del código de api_main.py no necesita cambios)
-# --- Definición de "Attribute Sets" para el Proxy ---
-FASTAPI_ATTRIBUTE_SETS = {
-    "QC_Convencional": [
-        "00180060",  # KVP
-        "00181151",  # XRayTubeCurrent
-        "00181153",  # ExposureInuAs
-        "00204000"   # ImageComments
-    ],
-    "InfoPacienteEstudio": [
-        "00100010", # PatientName
-        "00081030", # StudyDescription
-        "00080090"  # ReferringPhysicianName
-    ]
-}
+# --- Funciones Auxiliares ---
+def _parse_range_to_floats(range_str: Optional[str]) -> Optional[Tuple[float, float]]:
+    if not range_str: return None
+    try:
+        parts = range_str.strip().split('-')
+        if len(parts) == 1: val = float(parts[0].strip()); return (val, val) 
+        elif len(parts) == 2: return (float(parts[0].strip()), float(parts[1].strip()))
+        else: logger.warning(f"Formato de rango inesperado: '{range_str}'."); return None
+    except ValueError: logger.warning(f"Error al convertir valores del rango '{range_str}' a flotantes."); return None
 
-# --- ENDPOINTS PARA QIDO-RS (Proxy a dcm4chee-arc-light) ---
+def parse_lut_explanation(explanation_str_raw: Optional[Any]) -> LUTExplanationModel:
+    if explanation_str_raw is None: return LUTExplanationModel(FullText=None)
+    text = str(explanation_str_raw)
+    explanation_part = text 
+    in_calib_range_parsed: Optional[Tuple[float, float]] = None
+    out_lut_range_parsed: Optional[Tuple[float, float]] = None
+    regex_pattern = r"^(.*?)(?:InCalibRange:\s*([0-9\.\-]+))?\s*(?:OutLUTRange:\s*([0-9\.\-]+))?$"
+    match = re.fullmatch(regex_pattern, text.strip())
+    if match:
+        explanation_part = match.group(1).strip() if match.group(1) else ""
+        in_calib_range_str = match.group(2); out_lut_range_str = match.group(3)
+        if in_calib_range_str: in_calib_range_parsed = _parse_range_to_floats(in_calib_range_str.strip())
+        if out_lut_range_str: out_lut_range_parsed = _parse_range_to_floats(out_lut_range_str.strip())
+        if in_calib_range_parsed is None and "InCalibRange:" in explanation_part:
+            temp_parts = explanation_part.split("InCalibRange:", 1); explanation_part = temp_parts[0].strip()
+            if len(temp_parts) > 1: temp_in_calib_parts = temp_parts[1].split("OutLUTRange:", 1); in_calib_range_parsed = _parse_range_to_floats(temp_in_calib_parts[0].strip())
+        if out_lut_range_parsed is None and "OutLUTRange:" in explanation_part:
+            temp_parts = explanation_part.split("OutLUTRange:", 1)
+            if "InCalibRange:" not in temp_parts[0]: explanation_part = temp_parts[0].strip()
+            if len(temp_parts) > 1: out_lut_range_parsed = _parse_range_to_floats(temp_parts[1].strip())
+    else: 
+        logger.debug(f"Regex principal no coincidió para LUTExplanation: '{text}'. Usando texto completo como explicación.")
+        explanation_part = text # Mantener el texto original si el regex no capta nada
+    return LUTExplanationModel(FullText=text, Explanation=explanation_part if explanation_part else None, InCalibRange=in_calib_range_parsed, OutLUTRange=out_lut_range_parsed)
 
-async def qido_proxy_handler(request: Request):
-    """
-    Función genérica para manejar todas las solicitudes de proxy QIDO-RS.
-    """
-    pacs_url = f"{config.PACS_DICOMWEB_URL}{request.url.path.replace('/dicom-web', '')}"
+# --- Endpoints ---
+@app.get("/")
+async def root():
+    return {"message": "Bienvenido a la API de Consultas PACS DICOM"}
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    # Asegúrate de tener un archivo xray.ico en el mismo directorio que api_main.py o proporciona la ruta completa.
+    # Si el archivo está en un subdirectorio 'static', por ejemplo:
+    # return FileResponse("static/xray.ico")
+    # Por ahora, asumimos que está en el directorio raíz del proyecto.
+    # Es mejor usar una ruta absoluta o relativa al script actual para robustez.
+    favicon_path = os.path.join(os.path.dirname(__file__), "xray.ico")
+    if os.path.exists(favicon_path):
+        return FileResponse(favicon_path)
+    else:
+        # Devolver un 404 si no se encuentra, o no hacer nada si es opcional.
+        # FastAPI por defecto devuelve 404 si no hay ruta.
+        logger.warning(f"Favicon no encontrado en: {favicon_path}")
+        raise HTTPException(status_code=404, detail="Favicon not found")
+
+
+@app.get("/studies", response_model=List[StudyResponse])
+async def find_studies_endpoint(
+    # Parámetros de consulta específicos que son comunes
+    PatientID_param: Optional[str] = Query(None, alias="PatientID", description="Patient ID to filter by."),
+    StudyDate_param: Optional[str] = Query(None, alias="StudyDate", description="Study Date (YYYYMMDD or YYYYMMDD-YYYYMMDD range)."),
+    AccessionNumber_param: Optional[str] = Query(None, alias="AccessionNumber", description="Accession Number."),
+    ModalitiesInStudy_param: Optional[str] = Query(None, alias="ModalitiesInStudy", description="Modalities in Study (e.g., CT, MR)."),
+    PatientName_param: Optional[str] = Query(None, alias="PatientName", description="Patient's Name for filtering."),
+    # Parámetro de filtros genéricos
+    filters: Optional[str] = Query(None, description="JSON string for additional DICOM tag filtering, e.g., '{\"ReferringPhysicianName\":\"DOE^J\", \"(0008,0090)\":\"DOE^J\"}'")
+):
+    identifier = DicomDataset()
+    identifier.QueryRetrieveLevel = "STUDY"
+
+    # Campos que siempre queremos que se devuelvan con valor vacío si no se usan como filtro,
+    # para que pynetdicom los solicite.
+    base_return_fields = {
+        "StudyInstanceUID": "", "PatientID": "", "PatientName": "", "StudyDate": "",
+        "StudyDescription": "", "ModalitiesInStudy": "", "AccessionNumber": ""
+    }
+    for kw, val in base_return_fields.items():
+        setattr(identifier, kw, val)
+
+    # Aplicar parámetros de consulta específicos (tienen precedencia o se combinan)
+    if PatientID_param is not None: identifier.PatientID = PatientID_param
+    if StudyDate_param is not None: identifier.StudyDate = StudyDate_param
+    if AccessionNumber_param is not None: identifier.AccessionNumber = AccessionNumber_param
+    if ModalitiesInStudy_param is not None: identifier.ModalitiesInStudy = ModalitiesInStudy_param
+    if PatientName_param is not None: identifier.PatientName = PatientName_param
     
-    incoming_params = dict(request.query_params)
-    logger.info(f"Solicitud Proxy QIDO entrante para: {request.url}")
-    logger.debug(f"Parámetros entrantes: {incoming_params}")
-
-    if 'includefield' in incoming_params:
-        expanded_fields = []
-        fields_to_check = incoming_params['includefield'].split(',')
-        
-        for field in fields_to_check:
-            field = field.strip()
-            if field in FASTAPI_ATTRIBUTE_SETS:
-                expanded_fields.extend(FASTAPI_ATTRIBUTE_SETS[field])
-                logger.info(f"Expandiendo Attribute Set '{field}' a tags: {FASTAPI_ATTRIBUTE_SETS[field]}")
-            else:
-                expanded_fields.append(field)
-        
-        incoming_params['includefield'] = ",".join(expanded_fields)
-
-    logger.info(f"Reenviando solicitud QIDO a: {pacs_url} con parámetros: {incoming_params}")
-
-    async with httpx.AsyncClient() as client:
+    # Aplicar filtros genéricos del JSON
+    if filters:
         try:
-            pacs_response = await client.get(
-                pacs_url, 
-                params=incoming_params,
-                headers={"Accept": "application/dicom+json"},
-                timeout=30.0
-            )
-            pacs_response.raise_for_status()
-            return JSONResponse(content=pacs_response.json(), status_code=pacs_response.status_code)
+            filter_dict = json.loads(filters)
+            for key, value in filter_dict.items():
+                tag_obj: Optional[Tag] = None
+                original_key_for_log = key
+                try:
+                    if isinstance(key, str) and ',' in key: 
+                        group_str, elem_str = key.strip("() ").split(',')
+                        tag_obj = Tag(int(group_str, 16), int(elem_str, 16))
+                    else: 
+                        tag_val_from_kw = tag_for_keyword(str(key))
+                        if tag_val_from_kw:
+                            tag_obj = Tag(tag_val_from_kw)
+                        else:
+                            logger.warning(f"Keyword DICOM '{original_key_for_log}' en 'filters' para estudios no reconocido. Omitiendo.")
+                            continue
+                    
+                    dicom_keyword = keyword_for_tag(tag_obj)
+                    if dicom_keyword:
+                        setattr(identifier, dicom_keyword, value)
+                    else:
+                        identifier[tag_obj] = value
+                    logger.info(f"[find_studies_endpoint] Aplicando filtro: Tag {tag_obj} ({original_key_for_log}) = '{value}'")
 
-        except httpx.HTTPStatusError as exc:
-            logger.error(f"Error del PACS real: {exc.response.status_code} - {exc.response.text}")
-            raise HTTPException(
-                status_code=exc.response.status_code, 
-                detail=f"Error del PACS: {exc.response.text}"
-            )
-        except httpx.RequestError as exc:
-            logger.error(f"Error de conexión al contactar el PACS: {exc}")
-            raise HTTPException(
-                status_code=502,
-                detail=f"No se pudo conectar con el PACS en {exc.request.url}."
-            )
+                except ValueError:
+                    logger.warning(f"Formato de tag inválido '{original_key_for_log}' en 'filters' para estudios. Omitiendo.")
+                except Exception as e_filter_tag:
+                    logger.error(f"Error procesando tag de filtro para estudios '{original_key_for_log}': {e_filter_tag}", exc_info=True)
+        
+        except json.JSONDecodeError as e_json:
+            logger.error(f"Error decodificando JSON en 'filters' para estudios: {filters}. Error: {e_json}")
+            raise HTTPException(status_code=400, detail=f"Parámetro 'filters' con JSON inválido: {e_json}")
+    
+    logger.debug(f"[find_studies_endpoint] Identificador C-FIND final:\n{identifier}")
+    pacs_config_dict = {
+        "PACS_IP": config.PACS_IP, "PACS_PORT": config.PACS_PORT,
+        "PACS_AET": config.PACS_AET, "AE_TITLE": config.CLIENT_AET
+    }
+    try:
+        results_datasets = await pacs_operations.perform_c_find_async(
+            identifier, pacs_config_dict, query_model_uid='S'
+        )
+        response_studies: List[StudyResponse] = []
+        for res_ds in results_datasets:
+            response_studies.append(StudyResponse(
+                StudyInstanceUID=res_ds.get("StudyInstanceUID", ""),
+                PatientID=res_ds.get("PatientID", ""),
+                PatientName=str(res_ds.get("PatientName", "")), 
+                StudyDate=res_ds.get("StudyDate", ""),
+                StudyDescription=res_ds.get("StudyDescription", ""),
+                ModalitiesInStudy=res_ds.get("ModalitiesInStudy", ""),
+                AccessionNumber=res_ds.get("AccessionNumber", "")
+            ))
+        return response_studies
+    except Exception as e:
+        logger.error(f"Error en C-FIND de estudios: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal server error during PACS query: {str(e)}")
 
-# Rutas que capturan todas las consultas QIDO-RS
-app.add_api_route("/dicom-web/studies", qido_proxy_handler, methods=["GET"])
-app.add_api_route("/dicom-web/studies/{study_uid}/series", qido_proxy_handler, methods=["GET"])
-app.add_api_route("/dicom-web/studies/{study_uid}/series/{series_uid}/instances", qido_proxy_handler, methods=["GET"])
-app.add_api_route("/dicom-web/instances", qido_proxy_handler, methods=["GET"])
-app.add_api_route("/dicom-web/series", qido_proxy_handler, methods=["GET"])
+@app.get("/studies/{study_instance_uid}/series", response_model=List[SeriesResponse])
+async def find_series_in_study(
+    study_instance_uid: str,
+    filters: Optional[str] = Query(None, description="JSON string for DICOM tag filtering, e.g., '{\"Modality\":\"CT\", \"(0018,0015)\":\"CHEST\"}'")
+):
+    identifier = DicomDataset()
+    identifier.QueryRetrieveLevel = "SERIES"
+    identifier.StudyInstanceUID = study_instance_uid
+    
+    base_return_fields = {
+        "SeriesInstanceUID": "", "Modality": "", "SeriesNumber": "", "SeriesDescription": ""
+        # "KVP": "" # Si quieres KVP a nivel de serie, y el PACS lo soporta
+    }
+    for kw, val in base_return_fields.items():
+        setattr(identifier, kw, val)
 
-# --- Endpoints DIMSE ---
-# (Tus endpoints C-FIND, C-MOVE etc., van aquí sin cambios)
+    if filters:
+        try:
+            filter_dict = json.loads(filters)
+            for key, value in filter_dict.items():
+                tag_obj: Optional[Tag] = None
+                original_key_for_log = key
+                try:
+                    if isinstance(key, str) and ',' in key: 
+                        group_str, elem_str = key.strip("() ").split(',')
+                        tag_obj = Tag(int(group_str, 16), int(elem_str, 16))
+                    else: 
+                        tag_val_from_kw = tag_for_keyword(str(key))
+                        if tag_val_from_kw:
+                            tag_obj = Tag(tag_val_from_kw)
+                        else:
+                            logger.warning(f"Keyword DICOM '{original_key_for_log}' en 'filters' para series no reconocido. Omitiendo.")
+                            continue
+                    
+                    dicom_keyword = keyword_for_tag(tag_obj)
+                    if dicom_keyword:
+                        setattr(identifier, dicom_keyword, value)
+                    else:
+                        identifier[tag_obj] = value
+                    logger.info(f"[find_series_in_study] Aplicando filtro: Tag {tag_obj} ({original_key_for_log}) = '{value}'")
+
+                except ValueError:
+                    logger.warning(f"Formato de tag inválido '{original_key_for_log}' en 'filters' para series. Omitiendo.")
+                except Exception as e_filter_tag:
+                    logger.error(f"Error procesando tag de filtro para series '{original_key_for_log}': {e_filter_tag}", exc_info=True)
+        except json.JSONDecodeError as e_json:
+            logger.error(f"Error decodificando JSON en 'filters' para series: {filters}. Error: {e_json}")
+            raise HTTPException(status_code=400, detail=f"Parámetro 'filters' con JSON inválido para series: {e_json}")
+
+    logger.debug(f"[find_series_in_study] Identificador C-FIND final:\n{identifier}")
+    logger.info(f"----------------------------------------------------------------")
+    logger.info(f"IDENTIFICADOR C-FIND FINAL QUE SE ENVÍA AL PACS:")
+    logger.info(f"StudyInstanceUID: {identifier.get('StudyInstanceUID', 'NO PRESENTE')}")
+    logger.info(f"SeriesInstanceUID: {identifier.get('SeriesInstanceUID', 'NO PRESENTE')}")
+    logger.info(f"QueryRetrieveLevel: {identifier.get('QueryRetrieveLevel', 'NO PRESENTE')}")
+    logger.info(f"SOPInstanceUID: '{identifier.get('SOPInstanceUID', 'NO PRESENTE')}'")
+    logger.info(f"InstanceNumber: '{identifier.get('InstanceNumber', 'NO PRESENTE')}'")
+    
+    # Mostrar los campos que se usaron para filtrar o solicitar
+    logger.info(f"Contenido completo del identificador a enviar:")
+    for elem in identifier:
+        # Para una mejor visualización, puedes optar por no loguear tags binarios largos aquí
+        # o limitar la longitud del valor.
+        value_to_log = elem.value
+        if isinstance(value_to_log, bytes) and len(value_to_log) > 64: # Evitar logs muy largos para datos binarios
+            value_to_log = f"<bytes de longitud {len(elem.value)}>"
+        
+        if elem.keyword: # Mostrar campos con keyword
+            logger.info(f"    {elem.keyword} ({elem.tag}): VR='{elem.VR}', Value='{value_to_log}'")
+        else: # Mostrar campos sin keyword (ej. privados)
+            logger.info(f"    ({elem.tag}): VR='{elem.VR}', Value='{value_to_log}'")
+    logger.info(f"----------------------------------------------------------------")    
+    pacs_config_dict = {
+        "PACS_IP": config.PACS_IP, "PACS_PORT": config.PACS_PORT,
+        "PACS_AET": config.PACS_AET, "AE_TITLE": config.CLIENT_AET
+    }
+    try:
+        results_datasets = await pacs_operations.perform_c_find_async(
+            identifier, pacs_config_dict, query_model_uid='S' 
+        )
+        response_list: List[SeriesResponse] = []
+        for res_ds in results_datasets:
+            series_number_raw = res_ds.get("SeriesNumber")
+            series_number_for_pydantic: Optional[str] = None
+            if series_number_raw is not None:
+                try: series_number_for_pydantic = str(int(str(series_number_raw))) # Asegurar que es string antes de int
+                except (ValueError, TypeError): series_number_for_pydantic = str(series_number_raw)
+            
+            # KVP es un tag de nivel de instancia, pero algunos PACS pueden devolverlo a nivel de serie si es consistente.
+            # Lo incluimos en el modelo SeriesResponse, pero puede ser None.
+            kvp_val = res_ds.get("KVP") 
+            kvp_for_pydantic: Optional[str] = None
+            if kvp_val is not None:
+                 kvp_for_pydantic = str(kvp_val)
+
+
+            response_list.append(SeriesResponse(
+                StudyInstanceUID=res_ds.get("StudyInstanceUID", study_instance_uid),
+                SeriesInstanceUID=res_ds.get("SeriesInstanceUID", ""),
+                Modality=res_ds.get("Modality", ""),
+                SeriesNumber=series_number_for_pydantic,
+                SeriesDescription=res_ds.get("SeriesDescription", ""),
+                KVP=kvp_for_pydantic # Añadido al modelo de respuesta si lo necesitas
+            ))
+        return response_list
+    except Exception as e:
+        logger.error(f"Error en C-FIND de series: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error interno al consultar series: {str(e)}")
+
+
+# api_main.py
+# ... (importaciones existentes, asegúrate de tener json, Tag, keyword_for_tag, tag_for_keyword, DicomDataset) ...
+
+@app.get("/studies/{study_instance_uid}/series/{series_instance_uid}/instances", response_model=List[InstanceMetadataResponse])
+async def find_instances_in_series(
+    study_instance_uid: str,
+    series_instance_uid: str,
+    fields: Optional[List[str]] = Query(None, description="Lista de keywords DICOM o (gggg,eeee) a recuperar. E.g., 'PatientName', 'KVP', '(0020,4000)'."),
+    filters: Optional[str] = Query(None, description="JSON string for DICOM tag filtering, e.g., '{\"KVP\":\"70\", \"ImageComments\":\"Processed*\"}'")
+):
+    logger.debug(f"[find_instances_in_series] StudyUID: {study_instance_uid}, SeriesUID: {series_instance_uid}")
+    logger.debug(f"[find_instances_in_series] Recibido fields: {fields}")
+    logger.debug(f"[find_instances_in_series] Recibido filters: {filters}")
+
+    identifier = DicomDataset()
+    identifier.QueryRetrieveLevel = "IMAGE"
+    identifier.StudyInstanceUID = study_instance_uid
+    identifier.SeriesInstanceUID = series_instance_uid
+    
+    # Claves que siempre se solicitan (con valor vacío para universal matching y retorno)
+    # a menos que se especifiquen en 'filters' con un valor concreto.
+    identifier.SOPInstanceUID = ""
+    identifier.InstanceNumber = ""
+
+    # 1. Procesar FILTROS y añadirlos al IDENTIFIER con sus VALORES ESPECÍFICOS
+    if filters:
+        try:
+            filter_dict = json.loads(filters)
+            logger.debug(f"[find_instances_in_series] Filtros parseados: {filter_dict}")
+            for key, value in filter_dict.items():
+                tag_obj: Optional[Tag] = None
+                original_key_for_log = str(key) # Guardar para logging
+                try:
+                    if ',' in original_key_for_log: 
+                        group_str, elem_str = original_key_for_log.strip("() ").split(',')
+                        tag_obj = Tag(int(group_str, 16), int(elem_str, 16))
+                    else: 
+                        tag_val_from_kw = tag_for_keyword(original_key_for_log)
+                        if tag_val_from_kw:
+                            tag_obj = Tag(tag_val_from_kw)
+                        else:
+                            logger.warning(f"Keyword DICOM '{original_key_for_log}' en 'filters' no reconocido. Omitiendo.")
+                            continue
+                    
+                    if tag_obj:
+                        dicom_keyword = keyword_for_tag(tag_obj)
+                        if dicom_keyword:
+                            setattr(identifier, dicom_keyword, value)
+                        else:
+                            identifier[tag_obj] = value # Para tags sin keyword (ej. privados)
+                        logger.info(f"[find_instances_in_series] Aplicando filtro al 'identifier': Tag {tag_obj} ({original_key_for_log}) = '{value}'")
+
+                except ValueError as ve_filter:
+                    logger.warning(f"Formato de tag inválido '{original_key_for_log}' en 'filters': {ve_filter}. Omitiendo.")
+                except Exception as e_filter_tag:
+                    logger.error(f"Error procesando tag de filtro '{original_key_for_log}': {e_filter_tag}", exc_info=True)
+        except json.JSONDecodeError as e_json:
+            logger.error(f"Error decodificando JSON en 'filters': {filters}. Error: {e_json}")
+            raise HTTPException(status_code=400, detail=f"Parámetro 'filters' con JSON inválido: {e_json}")
+
+    # 2. Procesar FIELDS para solicitar su retorno y añadirlos al IDENTIFIER con VALOR VACÍO
+    #    SOLAMENTE si no fueron ya establecidos por un filtro con un valor específico.
+    requested_tags_for_response: Dict[str, Tag] = {} # Almacena Tag objects para la construcción de la respuesta
+    if fields:
+        logger.debug(f"[find_instances_in_series] Procesando 'fields' para solicitar retorno: {fields}")
+        for field_str_raw in fields:
+            field_str = str(field_str_raw)
+            tag_from_field: Optional[Tag] = None
+            try:
+                if ',' in field_str:
+                    group_str, elem_str = field_str.strip("() ").split(',')
+                    tag_from_field = Tag(int(group_str, 16), int(elem_str, 16))
+                else:
+                    tag_val_from_keyword = tag_for_keyword(field_str)
+                    if tag_val_from_keyword:
+                        tag_from_field = Tag(tag_val_from_keyword)
+                    else:
+                        logger.warning(f"Keyword DICOM '{field_str}' en 'fields' no reconocida. Omitiendo de 'requested_tags_for_response'.")
+                        continue
+                
+                if tag_from_field:
+                    requested_tags_for_response[str(tag_from_field)] = tag_from_field
+                    
+                    # Si el tag NO está en el identifier (no fue un filtro) O SI está pero con valor vacío (queremos asegurar que se pida)
+                    # NO queremos sobreescribir un valor de filtro específico (ej. KVP="70") con un valor vacío.
+                    if tag_from_field not in identifier or identifier.get(tag_from_field, "") == "":
+                        dicom_keyword_for_field = keyword_for_tag(tag_from_field)
+                        if dicom_keyword_for_field:
+                            # Asegurarse de que el atributo exista antes de intentar acceder a su valor
+                            if not hasattr(identifier, dicom_keyword_for_field) or getattr(identifier, dicom_keyword_for_field) == "":
+                                setattr(identifier, dicom_keyword_for_field, "")
+                        else:
+                             if tag_from_field not in identifier or identifier[tag_from_field] == "":
+                                identifier[tag_from_field] = ""
+                        logger.debug(f"Campo '{field_str}' (Tag: {tag_from_field}) añadido/asegurado en 'identifier' con valor vacío para solicitar su retorno.")
+            
+            except ValueError as ve_field:
+                logger.warning(f"Formato de tag DICOM inválido para field '{field_str}': {ve_field}. Omitiendo.")
+            except Exception as e_field_tag:
+                 logger.warning(f"Error procesando field '{field_str}' como tag DICOM: {e_field_tag}. Omitiendo.")
+
+    logger.info(f"[find_instances_in_series] Identificador C-FIND final (después de filters y fields):\n{identifier}")
+    
+    pacs_config_dict = {
+        "PACS_IP": config.PACS_IP, "PACS_PORT": config.PACS_PORT,
+        "PACS_AET": config.PACS_AET, "AE_TITLE": config.CLIENT_AET
+    }
+    try:
+        results_datasets = await pacs_operations.perform_c_find_async(
+            identifier, pacs_config_dict, query_model_uid='S'
+        )
+        
+        response_list: List[InstanceMetadataResponse] = []
+        logger.debug(f"[find_instances_in_series] Número de datasets recibidos del PACS: {len(results_datasets)}")
+
+        for i, res_ds in enumerate(results_datasets):
+            # ... (la lógica de construcción de 'headers' y 'response_list' permanece igual que en la respuesta anterior,
+            #      asegurándote de que usa 'requested_tags_for_response' o todos los tags de 'res_ds' si 'fields' no se proveyó,
+            #      y que la conversión de valores es robusta) ...
+            headers: Dict[str, Any] = {}
+            sop_instance_uid_val = res_ds.get("SOPInstanceUID", f"DESCONOCIDO_EN_POS_{i}")
+            instance_number_raw = res_ds.get("InstanceNumber")
+            instance_number_val: Optional[str] = None
+            if instance_number_raw is not None:
+                try: instance_number_val = str(int(str(instance_number_raw)))
+                except (ValueError, TypeError): instance_number_val = str(instance_number_raw)
+            
+            logger.debug(f"[find_instances_in_series] Procesando dataset de respuesta #{i} para SOPInstanceUID: {sop_instance_uid_val}")
+
+            tags_to_populate_headers = requested_tags_for_response
+            if not fields: 
+                logger.debug(f"No se especificaron 'fields'. Se intentarán devolver todos los tags del dataset de respuesta para SOPInstanceUID {sop_instance_uid_val}.")
+                tags_to_populate_headers = {str(elem.tag): elem.tag for elem in res_ds}
+            
+            logger.debug(f"Tags a incluir en headers para SOPInstanceUID {sop_instance_uid_val}: {[keyword_for_tag(t) or str(t) for t in tags_to_populate_headers.values()]}")
+
+            for tag_key_str_loop, tag_obj_to_get in tags_to_populate_headers.items(): # tag_key_str_loop es string "(G, E)"
+                if tag_obj_to_get in res_ds: # tag_obj_to_get es Tag(G,E)
+                    element = res_ds[tag_obj_to_get]
+                    key_to_use_in_json = keyword_for_tag(element.tag) or str(element.tag) # Nombre para el JSON de salida
+                    value_to_store: Any
+                    
+                    # Lógica de conversión de valor detallada (basada en la discusión anterior)
+                    if element.VR == 'SQ': 
+                        sequence_items = []
+                        if isinstance(element.value, pydicom.sequence.Sequence):
+                            for item_index, item_dataset in enumerate(element.value): 
+                                item_data: Dict[str, Any] = {}
+                                for item_element in item_dataset: 
+                                    item_key_in_seq = keyword_for_tag(item_element.tag) or str(item_element.tag)
+                                    item_val_in_seq: Any = None
+                                    if item_element.tag == Tag(0x0028, 0x3006): # LUTData
+                                        item_val_in_seq = f"Binary LUT data (length {len(item_element.value) if item_element.value is not None else 0}), not included"
+                                    elif item_element.tag == Tag(0x0028,0x3003): # LUTExplanation
+                                        item_val_in_seq = parse_lut_explanation(item_element.value)
+                                    elif item_element.VR == 'PN': item_val_in_seq = str(item_element.value) if item_element.value is not None else ""
+                                    elif item_element.VR in ['DA', 'DT', 'TM']: item_val_in_seq = str(item_element.value) if item_element.value is not None else ""
+                                    elif item_element.VR == 'IS':
+                                        if isinstance(item_element.value, MultiValue): item_val_in_seq = [str(int(str(v))) for v in item_element.value]
+                                        elif item_element.value is not None: item_val_in_seq = str(int(str(item_element.value)))
+                                        else: item_val_in_seq = None
+                                    elif item_element.VR == 'DS':
+                                        if isinstance(item_element.value, MultiValue): item_val_in_seq = [str(float(str(v))) for v in item_element.value]
+                                        elif item_element.value is not None: item_val_in_seq = str(float(str(item_element.value)))
+                                        else: item_val_in_seq = None
+                                    elif item_element.VR in ['US', 'SS', 'SL', 'UL', 'AT']:
+                                        if isinstance(item_element.value, MultiValue): item_val_in_seq = [int(str(v)) for v in item_element.value] # Convertir a int
+                                        elif item_element.value is not None: item_val_in_seq = int(str(item_element.value)) # Convertir a int
+                                        else: item_val_in_seq = None
+                                    elif item_element.VR in ['FL', 'FD']:
+                                        if isinstance(item_element.value, MultiValue): item_val_in_seq = [float(str(v)) for v in item_element.value]
+                                        elif item_element.value is not None: item_val_in_seq = float(str(item_element.value))
+                                        else: item_val_in_seq = None
+                                    elif isinstance(item_element.value, (bytes, bytearray)):
+                                        item_val_in_seq = f"Binary data (VR: {item_element.VR}, length {len(item_element.value)}), not included"
+                                    elif item_element.value is None: item_val_in_seq = None
+                                    else: item_val_in_seq = str(item_element.value)
+                                    item_data[item_key_in_seq] = item_val_in_seq
+                                sequence_items.append(item_data)
+                        value_to_store = sequence_items
+                    elif element.VR == 'PN': value_to_store = str(element.value) if element.value is not None else ""
+                    elif element.VR in ['DA', 'DT', 'TM']: value_to_store = str(element.value) if element.value is not None else ""
+                    elif element.VR == 'IS':
+                        if isinstance(element.value, MultiValue): value_to_store = [str(int(str(v))) for v in element.value]
+                        elif element.value is not None: value_to_store = str(int(str(element.value)))
+                        else: value_to_store = None
+                    elif element.VR == 'DS':
+                        if isinstance(element.value, MultiValue): value_to_store = [str(float(str(v))) for v in element.value]
+                        elif element.value is not None: value_to_store = str(float(str(element.value)))
+                        else: value_to_store = None
+                    elif element.VR in ['US', 'SS', 'SL', 'UL', 'AT']:
+                        if isinstance(element.value, MultiValue): value_to_store = [int(str(v)) for v in element.value] # Convertir a int
+                        elif element.value is not None: value_to_store = int(str(element.value)) # Convertir a int
+                        else: value_to_store = None
+                    elif element.VR in ['FL', 'FD']:
+                        if isinstance(element.value, MultiValue): value_to_store = [float(str(v)) for v in element.value]
+                        elif element.value is not None: value_to_store = float(str(element.value))
+                        else: value_to_store = None
+                    elif isinstance(element.value, (bytes, bytearray)) and element.VR not in ['OB', 'OW', 'OF', 'OD', 'OL', 'OV', 'UN', 'PixelData']: # Evitar PixelData
+                        try: value_to_store = element.value.decode(pydicom.charset.detect_charset(element.value, default='iso_ir_100')).strip()
+                        except: value_to_store = f"Undecodable text or binary data (VR: {element.VR}, length {len(element.value)})"
+                    elif isinstance(element.value, (bytes, bytearray)): # Para OB, OW etc.
+                         value_to_store = f"Binary data (VR: {element.VR}, length {len(element.value)}), not included"
+                    elif element.value is None: value_to_store = None
+                    else: value_to_store = str(element.value)
+                    
+                    headers[key_to_use_in_json] = value_to_store
+                    # logger.debug(f"Añadido a headers para SOPInstanceUID {sop_instance_uid_val}: '{key_to_use_in_json}' (VR: {element.VR}) = '{value_to_store}'")
+                else:
+                    key_to_use_if_missing = keyword_for_tag(tag_obj_to_get) or str(tag_obj_to_get)
+                    logger.debug(f"Tag '{key_to_use_if_missing}' (Tag: {tag_obj_to_get}) solicitado pero NO encontrado en la respuesta del PACS para SOPInstanceUID {sop_instance_uid_val}.")
+            
+            response_list.append(InstanceMetadataResponse(
+                SOPInstanceUID=sop_instance_uid_val,
+                InstanceNumber=instance_number_val,
+                dicom_headers=headers
+            ))
+        return response_list
+    except Exception as e:
+        logger.error(f"Error en C-FIND de instancias: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error interno al consultar instancias: {str(e)}")
+
+# ... (resto de tus endpoints, como /retrieve-instance, /retrieve-multiple-instances, /retrieved-instances/.../pixeldata)
+
+# --- Endpoints para C-MOVE ---
 
 # Endpoint para C-MOVE de una sola jerarquía (estudio, serie o instancia única)
 @app.post("/retrieve-instance", status_code=202, summary="Solicita al PACS mover un estudio/serie/instancia a esta API")
