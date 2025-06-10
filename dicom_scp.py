@@ -31,7 +31,22 @@ except Exception as e:
 
 
 def handle_store(event):
-    """Manejador para el evento evt.EVT_C_STORE en el SCP receptor."""
+    """
+    Manejador para el evento C-STORE (evt.EVT_C_STORE) del SCP.
+
+    Esta función se invoca cada vez que el SCP recibe una solicitud C-STORE
+    de un SCU (por ejemplo, desde un PACS tras una operación C-MOVE).
+    Guarda el dataset DICOM recibido en el directorio especificado en la
+    configuración.
+
+    Args:
+        event: El objeto del evento proporcionado por pynetdicom, que contiene
+               el dataset DICOM y el contexto de la asociación.
+
+    Returns:
+        Un código de estado DICOM. 0x0000 para éxito, o un código de error
+        en caso de fallo.
+    """
     try:
         ds = event.dataset
         
@@ -63,7 +78,17 @@ def handle_store(event):
         return 0xC001 # Error: No se puede procesar
 
 def handle_echo(event):
-    """Manejador para el evento evt.EVT_C_ECHO."""
+    """
+    Manejador para el evento C-ECHO (evt.EVT_C_ECHO) del SCP.
+
+    Responde a las solicitudes de verificación (ping) de un SCU.
+
+    Args:
+        event: El objeto del evento proporcionado por pynetdicom.
+
+    Returns:
+        0x0000 (Éxito) para indicar que el servicio está activo.
+    """
     calling_ae = getattr(event.assoc.ae, 'calling_ae_title', 'Desconocido')
     logger.info(f"Recibido C-ECHO de {calling_ae}")
     return 0x0000 
@@ -82,8 +107,16 @@ ae_scp.add_supported_context(Verification, ALL_TRANSFER_SYNTAXES)
 # CORRECCIÓN: La función ahora acepta un 'callback' opcional
 def start_scp_server(callback=None):
     """
-    Inicia el servidor C-STORE SCP. Esta función es bloqueante.
-    Si se proporciona un callback, se llama con la instancia del servidor AE.
+    Inicia el servidor DICOM C-STORE SCP (Service Class Provider).
+
+    Esta función es bloqueante y está diseñada para ser ejecutada en un hilo
+    separado. Escucha en el host y puerto configurados para recibir
+    imágenes DICOM.
+
+    Args:
+        callback: Una función opcional a la que se le pasará la instancia
+                  del servidor AE una vez creada. Esto permite al hilo principal
+                  controlar el servidor (ej. para apagarlo).
     """
     host = "0.0.0.0"
     port = config.API_SCP_PORT

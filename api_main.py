@@ -47,6 +47,15 @@ scp_thread: Optional[threading.Thread] = None
 
 @asynccontextmanager
 async def lifespan(app_lifespan: FastAPI): # Renombrado el parámetro para claridad
+    """
+    Gestiona el ciclo de vida de la aplicación FastAPI.
+
+    Inicia un servidor DICOM C-STORE SCP (Service Class Provider) en un hilo 
+    separado al arrancar la aplicación y lo detiene de forma segura al apagarla.
+
+    Args:
+        app_lifespan (FastAPI): La instancia de la aplicación FastAPI.
+    """
     global scp_thread
     logger.info("Iniciando aplicación FastAPI y servidor DICOM C-STORE SCP...")
     print("[FastAPI App] Iniciando aplicación y servidor DICOM C-STORE SCP...")
@@ -74,11 +83,23 @@ async def lifespan(app_lifespan: FastAPI): # Renombrado el parámetro para clari
 app = FastAPI(
     title="API de Consultas PACS DICOM (con C-STORE SCP y Filtros Dinámicos)", 
     version="1.3.0", # Versión incrementada para reflejar cambios
-    lifespan=lifespan
+    lifespan=lifespan,
+    swagger_favicon_url="/favicon.ico",
+    redoc_favicon_url="/favicon.ico"
 )
 
 # --- Funciones Auxiliares ---
 def _parse_range_to_floats(range_str: Optional[str]) -> Optional[Tuple[float, float]]:
+    """
+    Parsea una cadena que representa un rango (ej. "1.0-5.5" o "10") a una tupla de flotantes.
+
+    Args:
+        range_str: La cadena a parsear.
+
+    Returns:
+        Una tupla (min, max) si el parseo es exitoso, o None en caso contrario. 
+        Si la cadena contiene un solo número, devuelve (num, num).
+    """
     if not range_str: return None
     try:
         parts = range_str.strip().split('-')
@@ -88,6 +109,18 @@ def _parse_range_to_floats(range_str: Optional[str]) -> Optional[Tuple[float, fl
     except ValueError: logger.warning(f"Error al convertir valores del rango '{range_str}' a flotantes."); return None
 
 def parse_lut_explanation(explanation_str_raw: Optional[Any]) -> LUTExplanationModel:
+    """
+    Extrae información estructurada de una cadena de explicación de LUT (LUTExplanation).
+
+    Busca una descripción textual y rangos opcionales "InCalibRange" y "OutLUTRange"
+    dentro de la cadena proporcionada.
+
+    Args:
+        explanation_str_raw: El valor del tag LUTExplanation, puede ser de cualquier tipo.
+
+    Returns:
+        Un objeto LUTExplanationModel con los campos parseados.
+    """
     if explanation_str_raw is None: return LUTExplanationModel(FullText=None)
     text = str(explanation_str_raw)
     explanation_part = text 
@@ -115,21 +148,19 @@ def parse_lut_explanation(explanation_str_raw: Optional[Any]) -> LUTExplanationM
 # --- Endpoints ---
 @app.get("/")
 async def root():
+    """
+    Endpoint raíz que devuelve un mensaje de bienvenida.
+    """
     return {"message": "Bienvenido a la API de Consultas PACS DICOM"}
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
-    # Asegúrate de tener un archivo xray.ico en el mismo directorio que api_main.py o proporciona la ruta completa.
-    # Si el archivo está en un subdirectorio 'static', por ejemplo:
-    # return FileResponse("static/xray.ico")
-    # Por ahora, asumimos que está en el directorio raíz del proyecto.
-    # Es mejor usar una ruta absoluta o relativa al script actual para robustez.
+    # ... (comentarios)
     favicon_path = os.path.join(os.path.dirname(__file__), "xray.ico")
     if os.path.exists(favicon_path):
         return FileResponse(favicon_path)
     else:
-        # Devolver un 404 si no se encuentra, o no hacer nada si es opcional.
-        # FastAPI por defecto devuelve 404 si no hay ruta.
+        # ... (manejo de error)
         logger.warning(f"Favicon no encontrado en: {favicon_path}")
         raise HTTPException(status_code=404, detail="Favicon not found")
 
@@ -145,6 +176,23 @@ async def find_studies_endpoint(
     # Parámetro de filtros genéricos
     filters: Optional[str] = Query(None, description="JSON string for additional DICOM tag filtering, e.g., '{\"ReferringPhysicianName\":\"DOE^J\", \"(0008,0090)\":\"DOE^J\"}'")
 ):
+    """
+    Realiza una consulta C-FIND a nivel de estudio (STUDY) contra el PACS.
+
+    Permite filtrar por parámetros comunes (PatientID, StudyDate, etc.) y por
+    un JSON genérico para filtros adicionales basados en tags DICOM.
+
+    Args:
+        PatientID_param: ID del paciente.
+        StudyDate_param: Fecha del estudio.
+        AccessionNumber_param: Número de acceso.
+        ModalitiesInStudy_param: Modalidades en el estudio.
+        PatientName_param: Nombre del paciente.
+        filters: Una cadena JSON con pares tag-valor para filtros adicionales.
+
+    Returns:
+        Una lista de objetos StudyResponse con los resultados de la búsqueda.
+    """
     identifier = DicomDataset()
     identifier.QueryRetrieveLevel = "STUDY"
 
@@ -229,6 +277,19 @@ async def find_series_in_study(
     study_instance_uid: str,
     filters: Optional[str] = Query(None, description="JSON string for DICOM tag filtering, e.g., '{\"Modality\":\"CT\", \"(0018,0015)\":\"CHEST\"}'")
 ):
+    """
+    Realiza una consulta C-FIND a nivel de serie (SERIES) para un estudio dado.
+
+    Busca todas las series que pertenecen al `study_instance_uid` especificado
+    y opcionalmente aplica filtros adicionales desde una cadena JSON.
+
+    Args:
+        study_instance_uid: El UID del estudio a consultar.
+        filters: Una cadena JSON con pares tag-valor para filtros adicionales.
+
+    Returns:
+        Una lista de objetos SeriesResponse con los resultados.
+    """
     identifier = DicomDataset()
     identifier.QueryRetrieveLevel = "SERIES"
     identifier.StudyInstanceUID = study_instance_uid
@@ -343,6 +404,22 @@ async def find_instances_in_series(
     series_instance_uid: str,
     fields: Optional[List[str]] = Query(None, description="Lista de keywords DICOM o (gggg,eeee) a recuperar. E.g., 'KVP', '(0020,4000)'.")
 ):
+    """
+    Realiza una consulta C-FIND a nivel de imagen (IMAGE) para una serie dada.
+
+    Recupera metadatos para todas las instancias de la serie especificada.
+    El parámetro 'fields' permite solicitar el valor de tags DICOM específicos.
+
+    Args:
+        study_instance_uid: El UID del estudio.
+        series_instance_uid: El UID de la serie a consultar.
+        fields: Lista opcional de keywords de tags DICOM o tuplas (gggg,eeee)
+                cuyos valores se desean recuperar.
+
+    Returns:
+        Una lista de objetos InstanceMetadataResponse, cada uno con los
+        metadatos de una instancia.
+    """
     logger.info(f"Recibida petición C-FIND para instancias en series: {series_instance_uid}")
     logger.debug(f"Fields solicitados: {fields}")
 
@@ -412,6 +489,19 @@ async def find_instances_in_series(
 # Endpoint para C-MOVE de una sola jerarquía (estudio, serie o instancia única)
 @app.post("/retrieve-instance", status_code=202, summary="Solicita al PACS mover un estudio/serie/instancia a esta API")
 async def retrieve_instance_via_cmove(item: MoveRequest): # Usa el modelo MoveRequest original
+    """
+    Inicia una operación DICOM C-MOVE para recuperar un estudio, serie o instancia.
+
+    El PACS de origen enviará los ficheros DICOM al C-STORE SCP de esta API.
+
+    Args:
+        item (MoveRequest): Un objeto que especifica el `study_instance_uid` y,
+                            opcionalmente, `series_instance_uid` y/o `sop_instance_uid`
+                            de los datos a mover.
+
+    Returns:
+        Un mensaje indicando el estado final de la solicitud C-MOVE.
+    """
     identifier = DicomDataset()
     identifier.StudyInstanceUID = item.study_instance_uid
 
@@ -489,6 +579,19 @@ async def retrieve_instance_via_cmove(item: MoveRequest): # Usa el modelo MoveRe
 
 @app.post("/retrieve-multiple-instances", status_code=202, summary="Solicita al PACS mover múltiples instancias específicas a esta API")
 async def retrieve_multiple_instances_via_cmove(request_data: BulkMoveRequest):
+    """
+    Inicia múltiples operaciones DICOM C-MOVE para una lista de instancias específicas.
+
+    Itera sobre la lista de instancias proporcionada y solicita al PACS que mueva
+    cada una de ellas al C-STORE SCP de esta API.
+
+    Args:
+        request_data (BulkMoveRequest): Un objeto que contiene una lista de
+                                        identificadores de instancia a mover.
+
+    Returns:
+        Un resumen de los resultados para cada una de las operaciones C-MOVE.
+    """
     pacs_config_dict = {
         "PACS_IP": config.PACS_IP,
         "PACS_PORT": config.PACS_PORT,
@@ -573,6 +676,19 @@ async def retrieve_multiple_instances_via_cmove(request_data: BulkMoveRequest):
 
 @app.get("/retrieved-instances/{sop_instance_uid}/pixeldata", response_model=PixelDataResponse, summary="Obtiene datos de píxeles de una instancia recibida localmente")
 async def get_retrieved_instance_pixeldata(sop_instance_uid: str):
+    """
+    Recupera los datos de píxeles de un archivo DICOM almacenado localmente.
+
+    Este endpoint accede a un fichero DICOM que se ha recibido previamente
+    (normalmente vía C-MOVE) y extrae su array de píxeles.
+
+    Args:
+        sop_instance_uid: El SOP Instance UID del fichero DICOM a procesar.
+
+    Returns:
+        Un objeto PixelDataResponse que contiene la forma, tipo de dato y
+        una pequeña vista previa del array de píxeles.
+    """
     # Validar el SOPInstanceUID para evitar traversal attacks, aunque join lo mitiga.
     # Un UID válido no debería contener '..' o '/'.
     if not re.fullmatch(r"[0-9\.]+", sop_instance_uid): # Patrón simple para UIDs DICOM

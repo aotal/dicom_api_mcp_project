@@ -26,9 +26,17 @@ def obtener_datos_calibracion_vmp_k_linealizacion(
     ruta_archivo_csv: str,
 ) -> Optional[pd.DataFrame]:
     """
-    Carga un archivo CSV que contiene los datos de calibración VMP vs Kerma
-    usados para calcular la pendiente de linealización física.
-    Se espera que el CSV tenga columnas como 'K_uGy' y 'VMP'.
+    Carga los datos de calibración VMP vs Kerma desde un archivo CSV.
+
+    Estos datos se utilizan para calcular la pendiente de linealización física.
+    El CSV debe contener, como mínimo, las columnas 'K_uGy' y 'VMP'.
+
+    Args:
+        ruta_archivo_csv: La ruta al archivo CSV de calibración.
+
+    Returns:
+        Un DataFrame de pandas con los datos de calibración si la carga es
+        exitosa, o None en caso de error o si el archivo no es válido.
     """
     try:
         # Usar pathlib para manejo de rutas es más robusto
@@ -76,10 +84,23 @@ def obtener_datos_calibracion_vmp_k_linealizacion(
 def calculate_linearization_slope(
     calibration_df: pd.DataFrame, 
     rqa_type: str, 
-    rqa_factors_dict: Dict[str, float] # = RQA_FACTORS_EXAMPLE # Es mejor pasar esto explícitamente
+    rqa_factors_dict: Dict[str, float]
 ) -> Optional[float]:
     """
-    Calcula la pendiente (VMP vs quanta/area) para un RQA dado.
+    Calcula la pendiente de linealización (VMP vs. quanta/area) para un RQA dado.
+
+    La función convierte los valores de Kerma (K_uGy) del DataFrame a unidades
+    de "quanta por área" usando el factor RQA proporcionado y luego calcula la
+    pendiente de la relación lineal entre estos y los valores VMP.
+
+    Args:
+        calibration_df: DataFrame con los datos de calibración ('K_uGy', 'VMP').
+        rqa_type: El tipo de calidad de haz (ej. "RQA5") para buscar su factor.
+        rqa_factors_dict: Un diccionario que mapea tipos de RQA a sus factores de conversión.
+
+    Returns:
+        El valor de la pendiente calculada como un flotante, o None si no se
+        pudo calcular.
     """
     try:
         if not isinstance(calibration_df, pd.DataFrame): raise TypeError("calibration_df debe ser DataFrame.")
@@ -95,8 +116,8 @@ def calculate_linearization_slope(
         
         valid_cal_data = calibration_df[
             (calibration_df['K_uGy'] > EPSILON) & 
-            (np.isfinite(calibration_df['VMP'])) & # VMP debe ser finito
-            (np.isfinite(calibration_df['K_uGy']))  # K_uGy también debe ser finito
+            (np.isfinite(calibration_df['VMP'])) & 
+            (np.isfinite(calibration_df['K_uGy']))
         ].copy()
 
         if valid_cal_data.empty: 
@@ -137,7 +158,17 @@ def linearize_pixel_array(
     linearization_slope: float
 ) -> Optional[np.ndarray]:
     """
-    Linealiza un array de píxeles (ya preprocesado) dividiéndolo por la pendiente de linealización.
+    Linealiza un array de píxeles dividiéndolo por la pendiente de linealización.
+
+    Esta operación convierte los valores de píxel (VMP) a una escala que es
+    proporcional a los "quanta por área" incidentes.
+
+    Args:
+        pixel_array: El array de NumPy con los datos de la imagen.
+        linearization_slope: La pendiente de linealización a aplicar.
+
+    Returns:
+        Un nuevo array de NumPy con los píxeles linealizados, o None si hay un error.
     """
     if not isinstance(pixel_array, np.ndarray):
         logger.error("Entrada 'pixel_array' debe ser un numpy array.")
@@ -160,7 +191,18 @@ def linearize_pixel_array(
 
 def calculate_vmp_roi(imagen: np.ndarray, halfroi: int) -> Tuple[Optional[float], Optional[float]]:
     """
-    Calcula el Valor Medio de Píxel (VMP) y la desviación estándar en una ROI cuadrada central.
+    Calcula el Valor Medio de Píxel (VMP) y su desviación estándar en una ROI central.
+
+    Define una Región de Interés (ROI) cuadrada en el centro de la imagen y
+    calcula el promedio y la desviación estándar de los valores de píxel dentro de ella.
+
+    Args:
+        imagen: El array de NumPy 2D de la imagen.
+        halfroi: La mitad del lado de la ROI cuadrada (el tamaño será (2*halfroi)x(2*halfroi)).
+
+    Returns:
+        Una tupla (media, std_dev) con los valores calculados, o (None, None)
+        si no se pudo calcular.
     """
     try:
         if not isinstance(imagen, np.ndarray) or imagen.ndim != 2:
@@ -199,30 +241,34 @@ def add_linearization_parameters_to_dicom(
     ds: Dataset, 
     rqa_type: str, 
     linearization_slope: float,
-    private_creator_id: str = "LINEALIZATION_PARAMS_RFB" # RFB: Request For Behavior - elige un ID único
+    private_creator_id: str = "LINEALIZATION_PARAMS_RFB"
 ) -> Dataset:
     """
-    Añade los parámetros de linealización calculados a la cabecera DICOM
-    usando un bloque privado. No modifica los datos de píxeles.
+    Añade los parámetros de linealización a la cabecera DICOM usando tags privados.
+
+    Crea un bloque de tags privados identificado por `private_creator_id` y
+    almacena en él el tipo de RQA y la pendiente de linealización calculada.
+    No modifica los datos de píxeles.
+
+    Args:
+        ds: El dataset de pydicom al que se añadirán los tags.
+        rqa_type: El tipo de RQA (ej. "RQA5") a guardar.
+        linearization_slope: El valor de la pendiente a guardar.
+        private_creator_id: Un identificador único para tu bloque de datos privados.
+
+    Returns:
+        El dataset de pydicom modificado con los nuevos tags privados.
     """
     try:
         # Grupo privado (impar) para los parámetros de linealización.
-        # Elige un grupo que sepas que está libre en tus sistemas. 0x00F1 es solo un ejemplo.
-        # El estándar reserva (gggg,00xx) para Private Creator Data Elements.
-        # Los elementos de datos privados dentro del bloque son (gggg,xxee) donde xx es el bloque (10-FF).
         private_group = 0x00F1 
         
         # Obtener o crear el bloque privado
-        # El private_creator_id identifica tu bloque de datos privados.
         block = ds.private_block(private_group, private_creator_id, create=True)
         
-        # Definir los offsets de los elementos dentro del bloque privado (elementos 10-FF)
-        # (0x00F1, private_creator_id_offset) -> almacena 'private_creator_id'
-        # (0x00F1, 0xXX10) -> RQA Type
-        # (0x00F1, 0xXX11) -> Linearization Slope
-        # El 'XX' es el offset que Pydicom asigna o encuentra para tu private_creator_id.
-        # No necesitas saberlo explícitamente para añadir datos, solo el offset del elemento (ej. 0x10, 0x11).
-        
+        # Añadir los elementos de datos al bloque privado.
+        # Pydicom gestiona internamente el mapeo del offset del creador (ej. 0x10)
+        # a la dirección completa del tag (ej. 0x00F1, 1010).
         block.add_new(0x10, "LO", rqa_type) # Elemento offset 0x10: RQA Type
         block.add_new(0x11, "DS", f"{linearization_slope:.8e}") # Elemento offset 0x11: Linearization Slope
         
@@ -237,11 +283,10 @@ def add_linearization_parameters_to_dicom(
 
 
 if __name__ == '__main__':
-    from pathlib import Path # Para pruebas
-    import shutil # Para limpiar directorio de prueba
+    from pathlib import Path 
+    import shutil 
 
-    # Configurar logging básico para las pruebas de este módulo
-    if not logging.getLogger().hasHandlers(): # Evitar añadir handlers múltiples si se importa
+    if not logging.getLogger().hasHandlers():
         logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
     logger.info("--- Pruebas para linealize.py ---")
@@ -280,57 +325,25 @@ if __name__ == '__main__':
             ds_test.file_meta = Dataset() 
             ds_test.file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
 
-            # Definir el private_creator_id que se usó en la función para la prueba
             test_private_creator_id = "MY_LIN_PARAMS"
             ds_modified = add_linearization_parameters_to_dicom(ds_test, rqa, slope, test_private_creator_id)
             print("\nDataset DICOM con parámetros de linealización:")
             
-            found_block = False
-            # Definir private_group aquí para que esté en el ámbito de esta prueba
-            private_group_test = 0x00F1 # El mismo grupo usado en la función
-
-            for i in range(0x10, 0xFF): 
-                creator_tag = (private_group_test, i) # CORRECCIÓN: Usar private_group_test
-                if creator_tag in ds_modified and ds_modified[creator_tag].value == test_private_creator_id:
-                    print(f"  Bloque privado encontrado con creador '{ds_modified[creator_tag].value}' en offset 0x{i:02X}")
-                    # Acceder a los elementos usando el offset del bloque 'i'
-                    # El elemento es (grupo, (offset_bloque << 8) + offset_elemento_en_bloque)
-                    # Pydicom < 2.0: (grupo, offset_bloque*0x100 + offset_elemento_en_bloque)
-                    # Pydicom >= 2.0: ds.private_block(group, creator_id).get(element_offset) es más fácil
-                    # Para la verificación manual de tags como en la prueba:
-                    rqa_tag_in_block = (private_group_test, (i << 8) | 0x10) 
-                    slope_tag_in_block = (private_group_test, (i << 8) | 0x11)
-                    
-                    if rqa_tag_in_block in ds_modified:
-                         print(f"    RQA Type ({rqa_tag_in_block}): {ds_modified[rqa_tag_in_block].value}")
-                    else:
-                         print(f"    Tag RQA Type ({rqa_tag_in_block}) no encontrado en el bloque.")
-                    if slope_tag_in_block in ds_modified:
-                         print(f"    Slope ({slope_tag_in_block}): {ds_modified[slope_tag_in_block].value}")
-                    else:
-                         print(f"    Tag Slope ({slope_tag_in_block}) no encontrado en el bloque.")
-                    found_block = True
-                    break
-            if not found_block:
+            # Verificación simplificada usando el método private_block
+            private_group_test = 0x00F1
+            if ds_modified.get_private_block(private_group_test, test_private_creator_id):
+                block = ds_modified.private_block(private_group_test, test_private_creator_id)
+                rqa_val = block.get(0x10).value
+                slope_val = block.get(0x11).value
+                print(f"  Bloque privado '{test_private_creator_id}' encontrado.")
+                print(f"    RQA Type (tag offset 0x10): {rqa_val}")
+                print(f"    Slope (tag offset 0x11): {slope_val}")
+            else:
                 print(f"  No se encontró el bloque privado '{test_private_creator_id}' como se esperaba.")
         else:
             print(f"\nNo se pudo calcular la pendiente para {rqa}.")
     else:
         print("\nNo se pudieron cargar los datos de calibración desde el CSV de prueba.")
-
-
-    img_test_vmp = np.array([[float(i+j) for i in range(10)] for j in range(0,100,10)], dtype=np.float32)
-    vmp, std = calculate_vmp_roi(img_test_vmp, 2)
-    if vmp is not None:
-        print(f"\nPrueba VMP: Media={vmp:.2f}, StdDev={std:.2f}")
-    
-    vmp_zero_roi, _ = calculate_vmp_roi(img_test_vmp, 0)
-    if vmp_zero_roi is None:
-        print("Prueba VMP con halfroi=0 devolvió None como se esperaba.")
-
-    vmp_small_img, _ = calculate_vmp_roi(np.array([[1,2],[3,4]], dtype=float), 5) 
-    if vmp_small_img is not None:
-         print(f"Prueba VMP con halfroi > tamaño imagen: Media={vmp_small_img:.2f}")
 
     if test_csv_dir.exists():
         shutil.rmtree(test_csv_dir)

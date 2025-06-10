@@ -1,10 +1,22 @@
 # config.py
+"""
+Fichero de Configuración Central para la Aplicación DICOM.
+
+Este módulo contiene todas las variables de configuración utilizadas a lo largo del
+proyecto, como rutas de ficheros, parámetros de conexión al PACS, AE Titles,
+y configuraciones para funcionalidades específicas como la LUT de Kerma o la
+linealización física.
+
+Centralizar la configuración aquí permite modificar el comportamiento de la
+aplicación fácilmente sin tener que cambiar el código en múltiples lugares.
+"""
+
 import logging
 from pathlib import Path
 
 # --- Rutas del Sistema de Ficheros ---
 # Es buena práctica definir las rutas relativas al script de configuración o a una base del proyecto.
-# Aquí, asumimos que config.py está en el directorio raíz 'pacs/'.
+# Aquí, asumimos que config.py está en el directorio raíz del proyecto.
 BASE_PROJECT_DIR = Path(__file__).resolve().parent
 
 INPUT_DICOM_DIR = BASE_PROJECT_DIR / "input_dicom_files"
@@ -45,17 +57,16 @@ LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 
 
 # --- Parámetros de Linealización Física ---
-ENABLE_PHYSICAL_LINEALIZATION_PARAMS = False  # <--- ACTIVAR PARA LA PRUEBA
+ENABLE_PHYSICAL_LINEALIZATION_PARAMS = False  # <--- ACTIVAR/DESACTIVAR la adición de tags de linealización
 
 # Ruta al CSV para la linealización física (puede ser el mismo que para la LUT Kerma si es aplicable)
-PATH_CSV_LINEALIZACION_FISICA = BASE_PROJECT_DIR / "data" / "linearizacion.csv" # <--- AJUSTA SI ES OTRO FICHERO
+PATH_CSV_LINEALIZACION_FISICA = BASE_PROJECT_DIR / "data" / "linearizacion.csv"
 
 # Tipo de RQA por defecto a usar si no se determina de otra forma para la linealización física
-DEFAULT_RQA_TYPE_LINEALIZATION = "RQA5" # <--- AJUSTA AL RQA DE TUS DATOS DE CALIBRACIÓN
+DEFAULT_RQA_TYPE_LINEALIZATION = "RQA5"
 
 # Factores RQA (SNR_in^2 / 1000) para diferentes calidades de haz.
 # Estos son cruciales para convertir K_uGy a "quanta/area".
-# Deberías tener los valores correctos para los RQA que uses.
 RQA_FACTORS_PHYSICAL_LINEALIZATION: dict[str, float] = {
     "RQA3": 0.000085, # Ejemplo, reemplaza con tus valores reales
     "RQA5": 0.000123, # Ejemplo, como el de linealize.py
@@ -65,7 +76,7 @@ RQA_FACTORS_PHYSICAL_LINEALIZATION: dict[str, float] = {
 }
 
 # Private Creator ID para los tags de linealización física en la cabecera DICOM
-PRIVATE_CREATOR_ID_LINEALIZATION = "MIAPP_LINFO_V1" # <--- ELIGE UN ID ÚNICO Y SIGNIFICATIVO
+PRIVATE_CREATOR_ID_LINEALIZATION = "MIAPP_LINFO_V1" # ELIGE UN ID ÚNICO Y SIGNIFICATIVO
 
 
 # --- Otros Parámetros de la Aplicación ---
@@ -75,7 +86,16 @@ CLASSIFICATION_TAG_PREFIX = "QC_Class:"
 
 # --- Verificaciones (opcional pero recomendado) ---
 def check_paths():
-    """Verifica la existencia de directorios y ficheros cruciales."""
+    """
+    Verifica la existencia de directorios y ficheros cruciales al inicio.
+
+    Comprueba que las rutas definidas en la configuración (como el directorio
+    de entrada o los ficheros CSV) existan para evitar errores en tiempo de
+    ejecución. También intenta crear el directorio de salida.
+
+    Returns:
+        True si todas las rutas verificadas son válidas, False en caso contrario.
+    """
     logger_cfg = logging.getLogger(__name__) # Logger local para esta función
     paths_to_check = {
         "Directorio de entrada DICOM": INPUT_DICOM_DIR,

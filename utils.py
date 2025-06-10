@@ -27,10 +27,18 @@ TRANSLATION_DICT_200B7096: Dict[str, str] = {
 
 def get_translated_location(original_location_value: Union[str, bytes, None]) -> str:
     """
-    Traduce el valor de localización usando TRANSLATION_DICT_200B7096.
-    Devuelve el valor traducido, o el original si no se encuentra traducción,
-    o un valor por defecto si la entrada es None o vacía.
-    Maneja bytes decodificándolos.
+    Traduce el valor de localización usando un diccionario predefinido.
+
+    Maneja valores de entrada que pueden ser cadenas de texto, bytes o None.
+    Si el valor es en bytes, intenta decodificarlo. Devuelve el valor traducido,
+    el valor original si no se encuentra traducción, o un valor por defecto si la
+    entrada es inválida o vacía.
+
+    Args:
+        original_location_value: El valor original de la localización a traducir.
+
+    Returns:
+        La cadena de texto con la localización traducida o el valor por defecto.
     """
     default_translated_location = "UbicacioDesconeguda" 
 
@@ -69,8 +77,16 @@ def get_translated_location(original_location_value: Union[str, bytes, None]) ->
 
 def escribir_base64(ruta_archivo: str, cadena_base64: str) -> bool:
     """
-    Escribe una cadena Base64 en un archivo de texto.
-    Devuelve True si tiene éxito, False en caso contrario.
+    Escribe una cadena de texto (presumiblemente en Base64) en un archivo.
+
+    Crea el directorio de destino si no existe.
+
+    Args:
+        ruta_archivo: La ruta completa del archivo donde se guardará la cadena.
+        cadena_base64: La cadena de texto a escribir en el archivo.
+
+    Returns:
+        True si la escritura fue exitosa, False en caso de error.
     """
     try:
         directorio = os.path.dirname(ruta_archivo)
@@ -87,8 +103,18 @@ def escribir_base64(ruta_archivo: str, cadena_base64: str) -> bool:
 
 def obtener_ruta_salida(ruta_original: str, carpeta_destino: str, nueva_extension: str) -> str:
     """
-    Genera una ruta de salida completa en una carpeta de destino con una nueva extensión,
-    asegurando que el directorio de destino exista.
+    Genera una ruta de salida completa para un archivo en una carpeta de destino.
+
+    Toma el nombre base de la ruta original, lo combina con la carpeta de destino
+    y le añade una nueva extensión. Asegura que el directorio de destino exista.
+
+    Args:
+        ruta_original: La ruta del archivo original de la que se extraerá el nombre base.
+        carpeta_destino: El directorio donde se ubicará el nuevo archivo.
+        nueva_extension: La extensión que tendrá el nuevo archivo (ej. ".json", ".dcm").
+
+    Returns:
+        La ruta completa y normalizada del archivo de salida.
     """
     nombre_archivo_original = os.path.basename(ruta_original)
     nombre_base_original, _ = os.path.splitext(nombre_archivo_original)
@@ -107,8 +133,17 @@ def obtener_ruta_salida(ruta_original: str, carpeta_destino: str, nueva_extensio
 
 def copiar_fichero(ruta_origen: str, ruta_destino: str) -> bool:
     """
-    Copia un archivo de origen a destino, asegurando que el directorio de destino exista.
-    Devuelve True si tiene éxito, False en caso contrario.
+    Copia un archivo de una ruta de origen a una de destino.
+
+    Asegura que el directorio de destino exista antes de la copia. Utiliza
+    `shutil.copy2` para preservar metadatos del archivo.
+
+    Args:
+        ruta_origen: Ruta del archivo a copiar.
+        ruta_destino: Ruta de destino para la copia.
+
+    Returns:
+        True si la copia fue exitosa, False en caso contrario.
     """
     try:
         directorio_destino = os.path.dirname(ruta_destino)
@@ -129,8 +164,15 @@ def configurar_logging_aplicacion(log_file_path: Optional[str] = None,
                                    level: int = logging.INFO,
                                    log_format: str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'):
     """
-    Configura el logging para la aplicación.
-    Escribe en un archivo (opcional) y siempre en la consola.
+    Configura el sistema de logging para toda la aplicación.
+
+    Establece un `handler` para la consola (StreamHandler) y opcionalmente otro
+    para un archivo (FileHandler).
+
+    Args:
+        log_file_path: Ruta opcional al archivo donde se guardarán los logs.
+        level: El nivel mínimo de logging a registrar (ej. logging.INFO, logging.DEBUG).
+        log_format: El formato de los mensajes de log.
     """
     handlers = [logging.StreamHandler()] 
     if log_file_path:
@@ -158,9 +200,18 @@ def configurar_logging_aplicacion(log_file_path: Optional[str] = None,
 
 def clean_filename_part(part_value: Any, allowed_chars: str = "._-") -> str:
     """
-    Limpia una cadena para ser usada como parte de un nombre de fichero,
-    permitiendo solo caracteres alfanuméricos y los especificados en allowed_chars.
-    Reemplaza los no permitidos por un guion bajo.
+    Limpia una cadena para que sea segura para usar como parte de un nombre de archivo.
+
+    Reemplaza cualquier carácter que no sea alfanumérico o no esté en la lista de
+    caracteres permitidos por un guion bajo. También colapsa múltiples guiones
+    bajos y elimina los que queden al principio o al final.
+
+    Args:
+        part_value: El valor a limpiar, que se convertirá a cadena.
+        allowed_chars: Una cadena con caracteres adicionales que se deben permitir.
+
+    Returns:
+        La cadena de texto limpiada y segura para nombres de archivo.
     """
     if part_value is None:
         return "Desconegut" 
@@ -177,7 +228,15 @@ def clean_filename_part(part_value: Any, allowed_chars: str = "._-") -> str:
 
 
 def get_file_extension(filepath: str) -> str:
-    """Obtiene la extensión de un nombre de archivo (incluyendo el punto)."""
+    """
+    Obtiene la extensión de un nombre de archivo, incluyendo el punto.
+
+    Args:
+        filepath: La ruta o nombre del archivo.
+
+    Returns:
+        La extensión del archivo (ej. ".txt", ".dcm") o una cadena vacía si no tiene.
+    """
     if not filepath:
         return ""
     return os.path.splitext(os.path.basename(filepath))[1]
@@ -185,8 +244,18 @@ def get_file_extension(filepath: str) -> str:
 
 def convert_to_json_serializable(item: Any) -> Any:
     """
-    Convierte tipos de datos (especialmente de NumPy y handling de NaN/inf)
-    a tipos nativos de Python compatibles con la serialización JSON.
+    Convierte de forma recursiva un objeto a tipos nativos de Python compatibles con JSON.
+
+    Esta función es útil para manejar tipos de datos complejos como los de NumPy
+    (arrays, floats, ints) o valores como NaN/inf, que no son serializables
+    directamente por la librería `json` estándar.
+
+    Args:
+        item: El objeto a convertir (puede ser un dict, list, o cualquier tipo primitivo).
+
+    Returns:
+        Una versión del objeto con tipos compatibles con JSON (ej. `np.float32`
+        se convierte a `float`, `NaN` a `None`).
     """
     # Es necesario importar numpy aquí si las pruebas lo usan, o globalmente si es para el módulo
     import numpy as np 

@@ -32,6 +32,19 @@ logger = logging.getLogger(__name__)
 # --- Asegúrate de copiar esas versiones aquí ---
 
 def load_kerma_calibration_data_for_lut(csv_filepath: str) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """
+    Carga los datos de calibración desde un archivo CSV para generar una LUT de Kerma.
+
+    Lee las columnas 'VMP' (Valor Medio de Píxel) y 'K_uGy' (Kerma en microGrays)
+    necesarias para la interpolación de la Look-Up Table (LUT).
+
+    Args:
+        csv_filepath: La ruta al archivo CSV que contiene los datos de calibración.
+
+    Returns:
+        Una tupla con dos arrays de NumPy (pixel_values, kerma_values) si la carga
+        es exitosa, o (None, None) si ocurre un error o el fichero es inválido.
+    """
     try:
         path_obj = Path(csv_filepath)
         if not path_obj.is_file():
@@ -61,6 +74,19 @@ def load_kerma_calibration_data_for_lut(csv_filepath: str) -> tuple[Optional[np.
         return None, None
 
 async def read_and_decompress_dicom(filepath: Path) -> tuple[Optional[Dataset], Optional[Any]]:
+    """
+    Lee un archivo DICOM y lo descomprime si es necesario.
+
+    Esta función utiliza pydicom para leer el archivo. Si la sintaxis de transferencia
+    indica que está comprimido, intenta descomprimirlo en memoria.
+
+    Args:
+        filepath: La ruta (objeto Path) al archivo DICOM.
+
+    Returns:
+        Una tupla que contiene el dataset de pydicom y el array de píxeles si la
+        lectura es exitosa. Devuelve (None, None) en caso de error.
+    """
     logger.info(f"Leyendo y (si es necesario) descomprimiendo: {filepath.name}")
     try:
         if not filepath.is_file():
@@ -93,6 +119,23 @@ def _apply_kerma_lut_to_dataset(ds: Dataset,
                                 pixel_values_calibration: np.ndarray, 
                                 kerma_values_calibration: np.ndarray, 
                                 kerma_scaling_factor: float) -> Dataset:
+    """
+    Aplica una Modality LUT basada en Kerma a un dataset DICOM.
+
+    Esta función interna genera una Look-Up Table (LUT) que mapea los valores de
+    píxel originales a valores de Kerma escalados. Neutraliza las transformaciones
+    de reescalado existentes (RescaleSlope/Intercept), crea la `ModalityLUTSequence`
+    y ajusta la ventana de visualización (WindowCenter/Width).
+
+    Args:
+        ds: El dataset de pydicom a modificar.
+        pixel_values_calibration: Array de NumPy con los valores de píxel de la calibración.
+        kerma_values_calibration: Array de NumPy con los valores de Kerma de la calibración.
+        kerma_scaling_factor: Factor por el cual se multiplican los valores de Kerma.
+
+    Returns:
+        El dataset de pydicom modificado con la LUT de Kerma aplicada.
+    """
     sop_uid = ds.SOPInstanceUID if 'SOPInstanceUID' in ds else 'UID_DESCONOCIDO'
     logger.info(f"Aplicando Kerma LUT al dataset SOPInstanceUID: {sop_uid}")
     if not (isinstance(pixel_values_calibration, np.ndarray) and isinstance(kerma_values_calibration, np.ndarray)):
@@ -183,6 +226,33 @@ def process_and_prepare_dicom_for_pacs(
     rqa_type_param: Optional[str] = None,
     private_creator_id_linealizacion: Optional[str] = None
 ) -> Optional[Path]:
+    """
+    Procesa un dataset DICOM aplicando una serie de modificaciones y lo guarda.
+
+    Este es el pipeline principal que orquesta la modificación de las cabeceras
+    DICOM, incluyendo:
+    1. Ajuste de PatientID y PatientName.
+    2. Inserción de la clasificación de calidad (BAML).
+    3. Adición de parámetros de linealización física en tags privados.
+    4. Aplicación de la LUT de Kerma.
+    5. Saneamiento de tags como ImageType y SpecificCharacterSet.
+    6. Generación de un nuevo nombre de archivo estandarizado y guardado del fichero.
+
+    Args:
+        ds: El dataset de pydicom a procesar.
+        clasificacion_baml_mapeada: La cadena de clasificación de calidad a escribir.
+        pixel_values_lut_calib: Array de NumPy con valores de píxel para la LUT Kerma.
+        kerma_values_lut_calib: Array de NumPy con valores de Kerma para la LUT Kerma.
+        kerma_scaling_factor_lut: Factor de escalado para la LUT Kerma.
+        output_base_dir: Directorio base donde se guardará el archivo procesado.
+        original_filename: Nombre del archivo original (usado para logging).
+        linearization_slope_param: Pendiente de linealización física (opcional).
+        rqa_type_param: Tipo de RQA asociado a la pendiente (opcional).
+        private_creator_id_linealizacion: ID del creador para los tags privados (opcional).
+
+    Returns:
+        La ruta (objeto Path) al archivo DICOM procesado y guardado, o None si falla.
+    """
     sop_uid = ds.SOPInstanceUID if 'SOPInstanceUID' in ds else f"Original_{original_filename}"
     logger.info(f"Procesando dataset para PACS: {sop_uid}")
     
@@ -313,6 +383,14 @@ def process_and_prepare_dicom_for_pacs(
 #  Asegúrate de que la llamada a process_and_prepare_dicom_for_pacs dentro de la prueba
 #  pase 'clasificacion_baml_mapeada' con un valor como "FDT_TEST".)
 async def _test_pipeline_module():
+    """
+    Función de prueba asíncrona para validar el módulo de pipeline completo.
+
+    Configura un entorno de prueba con datos mock, crea un archivo DICOM de
+    entrada, ejecuta la función `process_and_prepare_dicom_for_pacs` y verifica
+    que el archivo de salida se genere correctamente y contenga los datos esperados.
+    Finalmente, limpia los archivos y directorios de prueba.
+    """
     if not logging.getLogger().hasHandlers():
          from utils import configurar_logging_aplicacion 
          configurar_logging_aplicacion(level=logging.DEBUG)
