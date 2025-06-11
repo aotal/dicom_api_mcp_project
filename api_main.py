@@ -5,6 +5,7 @@ import io
 import os
 import json # Para parsear filtros JSON
 from fastapi import FastAPI, HTTPException, Query
+from fastapi_mcp import FastApiMCP
 from starlette.responses import FileResponse # Para favicon
 from typing import Any, List, Optional, Dict, Tuple, Union # Añadido Union
 import threading
@@ -87,6 +88,11 @@ app = FastAPI(
     swagger_favicon_url="/favicon.ico",
     redoc_favicon_url="/favicon.ico"
 )
+
+mcp = FastApiMCP(app)
+
+# Mount the MCP server directly to your FastAPI app
+mcp.mount()
 
 # --- Funciones Auxiliares ---
 def _parse_range_to_floats(range_str: Optional[str]) -> Optional[Tuple[float, float]]:
