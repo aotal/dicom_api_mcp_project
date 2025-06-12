@@ -1,73 +1,79 @@
-uvicorn api_main:app --reload
+Este es un servidor MCP (Model Context Protocol) que expone operaciones DICOM como herramientas para agentes de IA.
 
-http://jupyter.arnau.scs.es:8000/studies/1.3.46.670589.30.41.0.1.128635482625724.1743412743040.1/series/1.3.46.670589.30.41.0.1.128635482625724.1743412778135.1/instances?fields=ImageComments&fields=ModalityLUTSequence&fields=StudyDate&fields=KVP&fields=PixelIntensityRelationship&fields=XrayTubeCurrent&fields=PixelIntensityRelationship&fields=XRayTubeCurrent&fields=ExposureInuAs
+## Características
 
-XrayTubeCurrent
-[
-{
-  "study_instance_uid": "1.3.46.670589.30.41.0.1.128635482625724.1743415641987.1",
-  "series_instance_uid": "1.3.46.670589.30.41.0.1.128635482625724.1743415707006.1",
-  "sop_instance_uid": "1.3.46.670589.30.41.0.1.128635482625724.1743416930131.1"
-},
-{
-  "study_instance_uid": "1.3.46.670589.30.41.0.1.128635482625724.1743415641987.1",
-  "series_instance_uid": "1.3.46.670589.30.41.0.1.128635482625724.1743415707006.1",
-  "sop_instance_uid": "1.3.46.670589.30.41.0.1.128635482625724.1743416930055.1"
-}
-]
+- Búsqueda de estudios DICOM en PACS
+- Búsqueda de series dentro de estudios
+- Consulta de metadatos de instancias
+- Movimiento de entidades DICOM al servidor local
+- Obtención de datos de píxeles de instancias locales
 
+## Instalación
 
-[
-  {
-    "StudyInstanceUID": "1.3.46.670589.30.41.0.1.128635482625724.1743415641987.1",
-    "SeriesInstanceUID": "1.3.46.670589.30.41.0.1.128635482625724.1743415707006.1",
-    "Modality": "DX",
-    "SeriesNumber": "1",
-    "SeriesDescription": "Objeto de prueba universal"
-  }
-]
+```bash
+pip install -e .
+```
 
+## Configuración
 
+1. Ajusta la variable `DICOM_SERVER_BASE_URL` en el archivo principal según tu configuración:
+   ```python
+   DICOM_SERVER_BASE_URL = "http://tu-servidor-dicom:puerto"
+   ```
 
-http://jupyter.arnau.scs.es:8080/dcm4chee-arc/aets/DCM4CHEE/rs
+2. Configura tu cliente MCP para usar este servidor:
+   ```json
+   {
+     "mcpServers": {
+       "dicom-tools": {
+         "command": "python",
+         "args": ["/ruta/a/dicom_mcp_server.py"],
+         "env": {
+           "DICOM_SERVER_URL": "http://localhost:8000"
+         }
+       }
+     }
+   }
+   ```
 
+## Uso
 
-curl -X GET "http://jupyter.arnau.scs.es:8000/dicom-web/studies/1.3.46.670589.30.41.0.1.128635482625724.1743412743040.1/series/1.3.46.670589.30.41.0.1.128635482625724.1743412778135.1/instances?ImageComments="MTF"
+El servidor expone las siguientes herramientas:
 
-curl -X GET "http://jupyter.arnau.scs.es:8000/dicom-web/studies/1.3.46.670589.30.41.0.1.128635482625724.1743412743040.1/series/1.3.46.670589.30.41.0.1.128635482625724.1743412778135.1/instances?ImageComments=MTF&includefield=QC_Convencional"
+### query_studies
+Busca estudios en el PACS
+- `patient_id`: ID del paciente
+- `study_date`: Fecha del estudio (YYYYMMDD)
+- `accession_number`: Número de acceso
+- `patient_name`: Nombre del paciente
+- `additional_filters`: Filtros adicionales
 
+### query_series
+Busca series dentro de un estudio
+- `study_instance_uid`: UID del estudio (requerido)
+- `additional_filters`: Filtros adicionales
 
-curl "http://jupyter.arnau.scs.es:8080/dcm4chee-arc/aets/DCM4CHEE/rs/studies/1.3.46.670589.30.41.0.1.128635482625724.1743412743040.1/series/1.3.46.670589.30.41.0.1.128635482625724.1743412778135.1/instances?includefield=QC_Convencional"
+### query_instances
+Busca metadatos de instancias en una serie
+- `study_instance_uid`: UID del estudio (requerido)
+- `series_instance_uid`: UID de la serie (requerido)
+- `fields_to_retrieve`: Campos específicos a recuperar
 
-curl "http://jupyter.arnau.scs.es:8000/dicom-web/studies/1.3.46.670589.30.41.0.1.128635482625724.1743412743040.1/series/1.3.46.670589.30.41.0.1.128635482625724.1743412778135.1/instances?includefield=QC_Convencional"
+### move_dicom_entity_to_local_server
+Mueve entidades DICOM al servidor local
+- `study_instance_uid`: UID del estudio (requerido)
+- `series_instance_uid`: UID de la serie (opcional)
+- `sop_instance_uid`: UID de la instancia (opcional)
 
-{
-  "instances_to_move": [
-{
-  "study_instance_uid": "1.3.46.670589.30.41.0.1.128635482625724.1743412743040.1",
-  "series_instance_uid": "1.3.46.670589.30.41.0.1.128635482625724.1743412778135.1",
-  "sop_instance_uid": "1.3.46.670589.30.41.0.1.128635482625724.1743414242787.1"
-},
-{
-  "study_instance_uid": "1.3.46.670589.30.41.0.1.128635482625724.1743412743040.1",
-  "series_instance_uid": "1.3.46.670589.30.41.0.1.128635482625724.1743412778135.1",
-  "sop_instance_uid": "1.3.46.670589.30.41.0.1.128635482625724.1743414242185.1"
-}
-  ]
-}
+### get_local_instance_pixel_data
+Obtiene datos de píxeles de instancias locales
+- `sop_instance_uid`: UID de la instancia (requerido)
 
+## Desarrollo
 
-[
-  {
-    "StudyInstanceUID": "1.3.46.670589.30.41.0.1.128635482625724.1743412743040.1",
-    "SeriesInstanceUID": "1.3.46.670589.30.41.0.1.128635482625724.1743412778135.1",
-    "Modality": "DX",
-    "SeriesNumber": "1",
-    "SeriesDescription": "Objeto de prueba universal"
-  }
-]
+Para desarrollo:
+```bash
+pip install -e ".[dev]"
+```
 
-
-curl -X GET \
-  -H "Accept: application/dicom+json" \
-  "http://jupyter.arnau.scs.es:11112/dcm4chee-arc/aets/DCM4CHEE/rs/instances?00180060=70-80&00204000=*MTF*&00181151=120&includefield=SOPInstanceUID,KVP,XRayTubeCurrent,ImageComments,PatientID&limit=10"
+## Licencia

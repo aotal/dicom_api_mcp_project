@@ -9,8 +9,8 @@
                 "mcp/time"
             ]
         },
-        "dicom-mcp-server": {
-            "url": "http://localhost:8000"
-        },
+        "my-mcp-server-e3a1bdfa": {
+            "url": "http://127.0.0.1:8000/"
+        }
     }
 }

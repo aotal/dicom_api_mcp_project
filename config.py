@@ -1,130 +1,102 @@
 # config.py
 """
-Fichero de Configuración Central para la Aplicación DICOM.
+Fichero de Configuración Central basado en Pydantic.
 
-Este módulo contiene todas las variables de configuración utilizadas a lo largo del
-proyecto, como rutas de ficheros, parámetros de conexión al PACS, AE Titles,
-y configuraciones para funcionalidades específicas como la LUT de Kerma o la
-linealización física.
-
-Centralizar la configuración aquí permite modificar el comportamiento de la
-aplicación fácilmente sin tener que cambiar el código en múltiples lugares.
+Separa la configuración en dos contextos principales:
+1. DicomGatewayConfig: Parámetros para la comunicación con el PACS y el servidor SCP.
+   Utilizado por las herramientas del agente de IA.
+2. LocalProcessingConfig: Parámetros para flujos de trabajo de procesamiento de archivos locales
+   (linealización, clasificación, etc.). Reservado para futuras herramientas.
 """
-
 import logging
 from pathlib import Path
+from pydantic import BaseModel, DirectoryPath, FilePath, Field
+from typing import Dict, Optional
 
-# --- Rutas del Sistema de Ficheros ---
-# Es buena práctica definir las rutas relativas al script de configuración o a una base del proyecto.
-# Aquí, asumimos que config.py está en el directorio raíz del proyecto.
-BASE_PROJECT_DIR = Path(__file__).resolve().parent
+# --- Modelos de Configuración con Pydantic ---
 
-INPUT_DICOM_DIR = BASE_PROJECT_DIR / "input_dicom_files"
-OUTPUT_PROCESSED_DICOM_DIR = BASE_PROJECT_DIR / "output_processed_dicom"
-LOG_FILENAME = "dicom_workflow.log" # Nombre del fichero de log
+class LoggingSettings(BaseModel):
+    level: int = logging.INFO
+    format: str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 
-# Ruta al fichero CSV para la calibración de la LUT Kerma
-PATH_LUT_CALIBRATION_CSV = BASE_PROJECT_DIR / "data" / "linearizacion.csv"
+class PACSNode(BaseModel):
+    """Configuración del nodo PACS remoto al que nos conectamos."""
+    ip: str = "127.0.0.1" # dcm4chee en Docker usa localhost si se exponen puertos
+    port: int = 11112
+    aet: str = "DCM4CHEE"
 
+class LocalSCP(BaseModel):
+    """Configuración de nuestro servidor C-STORE SCP local."""
+    aet: str = "FASTAPI_SCP"
+    port: int = 11115
+    storage_dir: DirectoryPath = Path("./dicom_received")
 
-# --- Configuración de la LUT Kerma ---
-KERMA_SCALING_FACTOR = 100.0 # Factor de escalado para los valores de Kerma en la LUT
+class ClientAE(BaseModel):
+    """Identidad de nuestra aplicación cuando actúa como cliente (SCU)."""
+    aet: str = "FASTAPI_CLIENT"
 
+class DicomGatewayConfig(BaseModel):
+    """Agrupa toda la configuración de comunicación DICOM."""
+    pacs_node: PACSNode = Field(default_factory=PACSNode)
+    local_scp: LocalSCP = Field(default_factory=LocalSCP)
+    client_ae: ClientAE = Field(default_factory=ClientAE)
 
-# --- Configuración del PACS ---
-# Reemplaza estos valores con los de tu entorno PACS real
-PACS_IP = "jupyter.arnau.scs.es"  # Dirección IP o hostname de tu servidor PACS
-PACS_PORT = 11112                  # Puerto del servidor PACS
-PACS_AET = "DCM4CHEE"              # AE Title del servidor PACS (destino)
+# --- Modelos para la Configuración de Procesamiento Local (reservado) ---
 
-# C-STORE
-API_SCP_AET = "FASTAPI_SCP"  # AE Title de tu API como receptor C-STORE
-API_SCP_PORT = 11115         # Puerto donde escuchará tu API (ejemplo)
-DICOM_RECEIVED_DIR = "./dicom_received" # Directorio para guardar imágenes recibidas
-
-# Configuración del Cliente AE (para nuestra API cuando actúa como SCU)
-CLIENT_AET = "FASTAPI_CLIENT"
-
-
-# --- Configuración de Logging ---
-# Puedes definir el nivel de logging global aquí
-LOG_LEVEL = logging.INFO  # Opciones: logging.DEBUG, logging.INFO, logging.WARNING, logging.ERROR, logging.CRITICAL
-LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-
-
-# --- Configuración de BAML (si es necesario) ---
-# SIMULATE_BAML = True # Añade esta flag si quieres controlar la simulación desde aquí
-
-
-# --- Parámetros de Linealización Física ---
-ENABLE_PHYSICAL_LINEALIZATION_PARAMS = False  # <--- ACTIVAR/DESACTIVAR la adición de tags de linealización
-
-# Ruta al CSV para la linealización física (puede ser el mismo que para la LUT Kerma si es aplicable)
-PATH_CSV_LINEALIZACION_FISICA = BASE_PROJECT_DIR / "data" / "linearizacion.csv"
-
-# Tipo de RQA por defecto a usar si no se determina de otra forma para la linealización física
-DEFAULT_RQA_TYPE_LINEALIZATION = "RQA5"
-
-# Factores RQA (SNR_in^2 / 1000) para diferentes calidades de haz.
-# Estos son cruciales para convertir K_uGy a "quanta/area".
-RQA_FACTORS_PHYSICAL_LINEALIZATION: dict[str, float] = {
-    "RQA3": 0.000085, # Ejemplo, reemplaza con tus valores reales
-    "RQA5": 0.000123, # Ejemplo, como el de linealize.py
-    "RQA7": 0.000250, # Ejemplo
-    "RQA9": 0.000456, # Ejemplo
-    # ... añade más RQA y sus factores según sea necesario
-}
-
-# Private Creator ID para los tags de linealización física en la cabecera DICOM
-PRIVATE_CREATOR_ID_LINEALIZATION = "MIAPP_LINFO_V1" # ELIGE UN ID ÚNICO Y SIGNIFICATIVO
-
-
-# --- Otros Parámetros de la Aplicación ---
-DICOM_TAG_FOR_CLASSIFICATION = "ImageComments" 
-CLASSIFICATION_TAG_PREFIX = "QC_Class:"
-
-
-# --- Verificaciones (opcional pero recomendado) ---
-def check_paths():
-    """
-    Verifica la existencia de directorios y ficheros cruciales al inicio.
-
-    Comprueba que las rutas definidas en la configuración (como el directorio
-    de entrada o los ficheros CSV) existan para evitar errores en tiempo de
-    ejecución. También intenta crear el directorio de salida.
-
-    Returns:
-        True si todas las rutas verificadas son válidas, False en caso contrario.
-    """
-    logger_cfg = logging.getLogger(__name__) # Logger local para esta función
-    paths_to_check = {
-        "Directorio de entrada DICOM": INPUT_DICOM_DIR,
-        "Fichero CSV de calibración LUT Kerma": PATH_LUT_CALIBRATION_CSV
+class PhysicalLinealization(BaseModel):
+    """Parámetros para la linealización física."""
+    enabled: bool = False
+    csv_path: Optional[FilePath] = Path("data/linearizacion.csv")
+    default_rqa_type: str = "RQA5"
+    rqa_factors: Dict[str, float] = {
+        "RQA3": 0.000085,
+        "RQA5": 0.000123,
+        "RQA7": 0.000250,
+        "RQA9": 0.000456,
     }
-    # Añadir el CSV de linealización física a la verificación si está habilitada
-    if ENABLE_PHYSICAL_LINEALIZATION_PARAMS:
-        paths_to_check["Fichero CSV de linealización física"] = PATH_CSV_LINEALIZACION_FISICA
+    private_creator_id: str = "MIAPP_LINFO_V1"
 
-    all_paths_valid = True
-    for description, path_obj in paths_to_check.items():
-        if not path_obj.exists():
-            logger_cfg.warning(f"CONFIG WARNING: {description} no encontrado en la ruta esperada: {path_obj}")
-            all_paths_valid = False
+class LocalProcessingConfig(BaseModel):
+    """Agrupa configuraciones para el procesamiento de archivos locales."""
+    base_project_dir: DirectoryPath = Path(__file__).resolve().parent
+    input_dir: DirectoryPath = Path("input_dicom_files")
+    output_dir: DirectoryPath = Path("output_processed_dicom")
     
-    try:
-        OUTPUT_PROCESSED_DICOM_DIR.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        logger_cfg.error(f"CONFIG ERROR: No se pudo crear el directorio de salida {OUTPUT_PROCESSED_DICOM_DIR}: {e}")
-        all_paths_valid = False
-    return all_paths_valid
+    kerma_lut_csv_path: Optional[FilePath] = Path("data/linearizacion.csv")
+    kerma_scaling_factor: float = 100.0
 
-# Configurar un logger básico si config.py se ejecuta directamente para check_paths
-if __name__ == "__main__":
-    logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
-    logger_main_cfg = logging.getLogger(__name__)
-    if check_paths():
-        logger_main_cfg.info("Verificación de rutas en config.py completada con éxito.")
-    else:
-        logger_main_cfg.error("Algunas rutas configuradas en config.py no son válidas o no existen.")
+    linealization: PhysicalLinealization = Field(default_factory=PhysicalLinealization)
+    
+    classification_tag: str = "ImageComments"
+    classification_prefix: str = "QC_Class:"
 
-# --- FIN DE config.py ---
+# --- Modelo Principal de Configuración ---
+
+class Settings(BaseModel):
+    """El objeto de configuración principal y único."""
+    logging: LoggingSettings = Field(default_factory=LoggingSettings)
+    gateway: DicomGatewayConfig = Field(default_factory=DicomGatewayConfig)
+    processing: LocalProcessingConfig = Field(default_factory=LocalProcessingConfig)
+
+# --- Instancia de Configuración Global ---
+# Aquí se cargan y validan todas las configuraciones al iniciar la aplicación.
+settings = Settings()
+
+# --- Verificación de Rutas (opcional, pero buena práctica) ---
+def check_and_create_dirs():
+    """Asegura que los directorios necesarios existan."""
+    logger = logging.getLogger(__name__)
+    dirs_to_create = [
+        settings.gateway.local_scp.storage_dir,
+        settings.processing.input_dir,
+        settings.processing.output_dir
+    ]
+    for dir_path in dirs_to_create:
+        try:
+            dir_path.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Directorio asegurado: {dir_path}")
+        except OSError as e:
+            logger.error(f"Error creando el directorio {dir_path}: {e}")
+
+# Ejecutar la comprobación al importar el módulo
+check_and_create_dirs()
