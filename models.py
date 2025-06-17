@@ -58,7 +58,11 @@ class LUTExplanationModel(BaseModel):
 class InstanceMetadataResponse(BaseModel):
     SOPInstanceUID: str
     InstanceNumber: Optional[str] = None
-    dicom_headers: Dict[str, Any] = Field({})
+    # Cambiar a Optional y el valor por defecto a None
+    dicom_headers: Optional[Dict[str, Any]] = None
+
+    class Config:
+        from_attributes = True # Asegúrate de que esto esté si usas validación desde atributos de objeto
 
 class PixelDataResponse(BaseModel):
     sop_instance_uid: str

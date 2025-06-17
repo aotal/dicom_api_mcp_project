@@ -21,7 +21,7 @@ class LoggingSettings(BaseModel):
 
 class PACSNode(BaseModel):
     """Configuración del nodo PACS remoto al que nos conectamos."""
-    ip: str = "127.0.0.1" # dcm4chee en Docker usa localhost si se exponen puertos
+    ip: str = "jupyter.arnau.scs.es" # dcm4chee en Docker usa localhost si se exponen puertos
     port: int = 11112
     aet: str = "DCM4CHEE"
 

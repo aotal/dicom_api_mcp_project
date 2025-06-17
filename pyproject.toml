@@ -9,6 +9,7 @@ dependencies = [
     "fastapi-mcp>=0.3.4",
     "httpx>=0.28.1",
     "matplotlib>=3.10.3",
+    "mcp[cli]>=1.9.3",
     "numpy>=2.2.6",
     "pydicom>=3.0.1",
     "pynetdicom>=2.0.2",
