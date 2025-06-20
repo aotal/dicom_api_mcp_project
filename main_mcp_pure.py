@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import httpx
 
 # --- Importaciones de tu proyecto ---
-# Usamos el config.py HÍBRIDO que soporta tanto gateway como dicomweb
+# Usamos el config.py de pydantic-settings que ya configuramos
 from config import settings
 import pacs_operations
 import dicom_scp
@@ -33,11 +33,11 @@ logging.basicConfig(level=settings.logging.level, format=settings.logging.format
 logger = logging.getLogger(__name__)
 
 # --- INICIO: NUEVA FUNCIÓN AUXILIAR DICOMweb ---
-# Añadimos la función de búsqueda QIDO-RS aquí mismo para poder probarla de forma aislada.
+# Añadimos la función de búsqueda QIDO-RS aquí mismo para probar.
 async def query_pacs_qido(params: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Realiza una consulta QIDO-RS (búsqueda) al PACS."""
-    # Accedemos a la nueva sección [dicomweb] de nuestro config.py híbrido
-    qido_url = f"{settings.dicomweb.base_url}/aets/{settings.dicomweb.aet}/rs/studies"
+    # Nótese que usamos la nueva configuración de settings.pacs
+    qido_url = f"{settings.pacs.base_url}/aets/{settings.pacs.aet}/rs/studies"
     headers = {"Accept": "application/dicom+json"}
     logger.info(f"Ejecutando consulta QIDO-RS a: {qido_url} con params: {params}")
 
@@ -55,13 +55,13 @@ async def query_pacs_qido(params: Dict[str, Any]) -> List[Dict[str, Any]]:
 # --- FIN: NUEVA FUNCIÓN AUXILIAR DICOMweb ---
 
 
-# --- La infraestructura de C-MOVE se mantiene intacta por ahora ---
 @dataclass
 class DicomToolContext:
     """Clase para contener la configuración que usarán las herramientas."""
     pacs_config: Dict[str, Any]
     move_destination_aet: str
 
+# El resto de la infraestructura C-MOVE se mantiene intacta por ahora
 dicom_context: Optional[DicomToolContext] = None
 scp_thread: Optional[threading.Thread] = None
 
@@ -70,6 +70,7 @@ def _initialize_server():
     global dicom_context, scp_thread
     logger.info("Inicializando servidor MCP puro...")
 
+    # Usamos la configuración anidada del nuevo config.py
     dicom_context = DicomToolContext(
         pacs_config={
             "PACS_IP": settings.gateway.pacs_node.ip,
@@ -109,7 +110,6 @@ def _shutdown_scp_server():
 _initialize_server()
 atexit.register(_shutdown_scp_server)
 
-# --- Definición del Servidor y las Herramientas MCP ---
 mcp = FastMCP(
     "ServidorDeHerramientasDICOM",
     description="Un servidor que expone operaciones DICOM como herramientas para agentes de IA."
@@ -124,9 +124,9 @@ async def query_studies(
     additional_filters: Optional[Dict[str, str]] = None
 ) -> str:
     """
-    Busca estudios DICOM en el PACS. [USA DICOMweb/QIDO-RS]
+    Busca estudios DICOM en el PACS. [AHORA USA DICOMweb/QIDO-RS]
     """
-    # --- INICIO: LÓGICA MODIFICADA (DICOMweb) ---
+    # --- INICIO: LÓGICA MODIFICADA ---
     logger.info(f"Ejecutando query_studies con la nueva lógica DICOMweb (QIDO-RS)")
     
     params = {"includefield": "all"}
@@ -147,47 +147,48 @@ async def query_studies(
     results = await query_pacs_qido(params)
     
     if not results:
-        return json.dumps({"message": "No se encontraron estudios para los criterios especificados."})
+        return json.dumps({"error": "No se encontraron estudios para los criterios especificados."})
 
-    # Formateamos el JSON para que sea más legible para un humano o un agente
-    formatted_results = []
-    for study in results:
-        study_date_val = study.get("00080020", {}).get("Value", ["N/A"])[0]
-        study_desc_val = study.get("00081030", {}).get("Value", ["N/A"])[0]
-        study_uid_val = study.get("0020000D", {}).get("Value", [""])[0]
-        modalities_val = ""
-        if "00080061" in study and "Value" in study["00080061"]:
-            modalities_val = ", ".join(study["00080061"]["Value"])
-        
-        formatted_results.append({
-            "StudyInstanceUID": study_uid_val,
-            "StudyDate": study_date_val,
-            "ModalitiesInStudy": modalities_val,
-            "StudyDescription": study_desc_val,
-        })
-        
-    return json.dumps(formatted_results, indent=2)
+    # La respuesta de QIDO-RS ya es JSON, así que la devolvemos directamente.
+    # Podríamos formatearla para que sea más legible si quisiéramos.
+    return json.dumps(results, indent=2)
     # --- FIN: LÓGICA MODIFICADA ---
 
-    # --- INICIO: LÓGICA ANTIGUA (C-FIND) COMENTADA PARA REFERENCIA ---
+
+    # --- INICIO: LÓGICA ANTIGUA (C-FIND) COMENTADA ---
     # if not dicom_context:
     #     return json.dumps({"error": "El contexto DICOM no está inicializado."})
+    
     # identifier = DicomDataset()
     # identifier.QueryRetrieveLevel = "STUDY"
     # for kw in ["StudyInstanceUID", "PatientID", "PatientName", "StudyDate", "StudyDescription", "ModalitiesInStudy", "AccessionNumber"]:
     #     setattr(identifier, kw, "")
+    
     # if patient_id: identifier.PatientID = patient_id
     # if study_date: identifier.StudyDate = study_date
     # if accession_number: identifier.AccessionNumber = accession_number
     # if patient_name: identifier.PatientName = patient_name
-    # logger.info(f"Ejecutando query_studies con el identificador (C-FIND):\n{identifier}")
+    
+    # if additional_filters:
+    #     for key, value in additional_filters.items():
+    #         try:
+    #             tag = Tag(key) if ',' in str(key) else Tag(tag_for_keyword(str(key)))
+    #             keyword = keyword_for_tag(tag)
+    #             if keyword: setattr(identifier, keyword, value)
+    #             else: identifier[tag] = value
+    #         except Exception:
+    #             logger.warning(f"No se pudo procesar el filtro de estudio '{key}'.")
+    
+    # logger.info(f"Ejecutando query_studies con el identificador:\n{identifier}")
     # results = await pacs_operations.perform_c_find_async(identifier, dicom_context.pacs_config, query_model_uid='S')
     # response_data = [StudyResponse.model_validate(ds, from_attributes=True).model_dump() for ds in results]
     # return json.dumps(response_data, indent=2)
     # --- FIN: LÓGICA ANTIGUA (C-FIND) COMENTADA ---
 
+
 # ===================================================================
-# EL RESTO DE LAS HERRAMIENTAS PERMANECEN EXACTAMENTE IGUALES
+# EL RESTO DE LAS HERRAMIENTAS (query_series, move_dicom_entity, etc.)
+# PERMANECEN EXACTAMENTE IGUALES, USANDO LA LÓGICA ANTIGUA DE C-MOVE
 # ===================================================================
 
 @mcp.tool()
@@ -195,7 +196,7 @@ async def query_series(
     study_instance_uid: str,
     additional_filters: Optional[Dict[str, str]] = None
 ) -> str:
-    """Busca todas las series DICOM que pertenecen a un estudio específico. [USA C-FIND]"""
+    """Busca todas las series DICOM que pertenecen a un estudio específico."""
     if not dicom_context:
         return json.dumps({"error": "El contexto DICOM no está inicializado."})
     
@@ -226,7 +227,8 @@ async def query_instances_dicomweb(
     series_instance_uid: str,
     attribute_set_id: str = "QC_Convencional"
 ) -> str:
-    """Busca metadatos de instancias usando DICOMweb (QIDO-RS) [SIN CAMBIOS]"""
+    """[MODERNO/RECOMENDADO] Busca y formatea metadatos de instancias usando DICOMweb (QIDO-RS)"""
+    # Esta herramienta ya usaba DICOMweb, así que no necesita cambios.
     pacs_web_port = 8080
     pacs_aet = "DCM4CHEE"
     base_url = f"http://jupyter.arnau.scs.es:{pacs_web_port}/dcm4chee-arc/aets/{pacs_aet}/rs"
@@ -235,12 +237,15 @@ async def query_instances_dicomweb(
         f"/series/{series_instance_uid}/instances"
         f"?includefield={attribute_set_id}"
     )
+
     logger.info(f"Ejecutando consulta DICOMweb (QIDO-RS): {url}")
+
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(url, headers={"Accept": "application/dicom+json"})
             response.raise_for_status()
             raw_instances_data = response.json()
+
             parsed_response_list = []
             for instance_data in raw_instances_data:
                 headers = {}
@@ -252,19 +257,25 @@ async def query_instances_dicomweb(
                         headers[key_to_use] = value
                     except:
                         headers[tag_hex] = tag_content.get("Value", [None])[0]
+
                 sop_instance_uid = headers.pop("SOPInstanceUID", "")
                 instance_number = str(headers.pop("InstanceNumber", ""))
+
                 instance_response = InstanceMetadataResponse(
                     SOPInstanceUID=sop_instance_uid,
                     InstanceNumber=instance_number,
                     dicom_headers=headers
                 )
                 parsed_response_list.append(instance_response.model_dump())
+
             return json.dumps(parsed_response_list, indent=2)
+
     except httpx.HTTPStatusError as e:
-        return json.dumps({"error": f"Error del servidor PACS (HTTP {e.response.status_code}): {e.response.text}"})
+        error_msg = f"Error del servidor PACS (HTTP {e.response.status_code}): {e.response.text}"
+        return json.dumps({"error": error_msg})
     except Exception as e:
-        return json.dumps({"error": f"Error de conexión o inesperado al contactar el servidor DICOMweb: {e}"})
+        error_msg = f"Error de conexión o inesperado al contactar el servidor DICOMweb: {e}"
+        return json.dumps({"error": error_msg})
 
 @mcp.tool()
 async def move_dicom_entity_to_local_server(
@@ -272,11 +283,13 @@ async def move_dicom_entity_to_local_server(
     series_instance_uid: Optional[str] = None,
     sop_instance_uid: Optional[str] = None
 ) -> str:
-    """Solicita al PACS que mueva un estudio/serie/instancia a este servidor. [USA C-MOVE]"""
+    """Solicita al PACS que mueva un estudio, serie o instancia completa a este servidor."""
     if not dicom_context:
         return json.dumps({"error": "El contexto DICOM no está inicializado."})
+
     identifier = DicomDataset()
     identifier.StudyInstanceUID = study_instance_uid
+
     if sop_instance_uid:
         if not series_instance_uid:
             return json.dumps({"error": "Se requiere 'series_instance_uid' para mover una instancia específica."})
@@ -288,10 +301,12 @@ async def move_dicom_entity_to_local_server(
         identifier.SeriesInstanceUID = series_instance_uid
     else:
         identifier.QueryRetrieveLevel = "STUDY"
+        
     logger.info(f"Ejecutando C-MOVE para QueryLevel='{identifier.QueryRetrieveLevel}'")
     move_responses = await pacs_operations.perform_c_move_async(
         identifier, dicom_context.pacs_config, dicom_context.move_destination_aet, query_model_uid='S'
     )
+    
     final_status = move_responses[-1][0] if move_responses and move_responses[-1] else None
     if final_status and hasattr(final_status, 'Status'):
         response = {
@@ -302,18 +317,21 @@ async def move_dicom_entity_to_local_server(
         }
     else:
         response = {"status_code_hex": "UNKNOWN", "message": "No se recibió respuesta de estado final del PACS."}
+
     return json.dumps(response, indent=2)
 
 @mcp.tool()
 async def get_local_instance_pixel_data(sop_instance_uid: str) -> str:
-    """Recupera los datos de píxeles de una imagen DICOM guardada localmente. [SIN CAMBIOS]"""
+    """Recupera los datos de píxeles de una imagen DICOM que ya ha sido guardada localmente."""
     filepath = settings.gateway.local_scp.storage_dir / (sop_instance_uid + ".dcm")
     if not filepath.is_file():
         return json.dumps({"error": f"Archivo DICOM no encontrado localmente en {filepath}"})
+    
     try:
         ds = pydicom.dcmread(str(filepath), force=True)
         if not hasattr(ds, 'PixelData') or ds.PixelData is None:
              return json.dumps({"error": "El objeto DICOM no contiene datos de píxeles."})
+        
         pixel_array = ds.pixel_array
         preview = None
         if pixel_array.ndim >= 2 and pixel_array.size > 0:
@@ -327,12 +345,14 @@ async def get_local_instance_pixel_data(sop_instance_uid: str) -> str:
                 elif ds.get("SamplesPerPixel", 1) > 1 and pixel_array.shape[-1] == ds.SamplesPerPixel:
                     rows_preview, cols_preview = min(pixel_array.shape[0], 5), min(pixel_array.shape[1], 5)
                     preview = pixel_array[:rows_preview, :cols_preview, 0].tolist()
+        
         response = PixelDataResponse(
             sop_instance_uid=sop_instance_uid, rows=ds.Rows, columns=ds.Columns,
             pixel_array_shape=pixel_array.shape, pixel_array_dtype=str(pixel_array.dtype),
             pixel_array_preview=preview, message="Pixel data accessed from local file."
         )
         return response.model_dump_json(indent=2)
+        
     except Exception as e:
         logger.error(f"Error procesando archivo local {filepath}: {e}", exc_info=True)
         return json.dumps({"error": f"Error interno procesando el archivo: {str(e)}"})
